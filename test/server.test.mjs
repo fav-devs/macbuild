@@ -37,13 +37,19 @@ async function until(check, ms = 15000) {
     await new Promise((resolve) => { setTimeout(resolve, 100); });
   }
 }
-function project(name) {
+function project(name, { icon = '' } = {}) {
   const origin = join(dir, `${name}.git`);
   const app = join(dir, name);
   git(dir, 'init', '-q', '--bare', origin);
   mkdirSync(app);
   git(app, 'init', '-q', '-b', 'main');
   writeFileSync(join(app, 'eas.json'), JSON.stringify({ build: { development: { distribution: 'internal' } } }));
+  if (icon) {
+    mkdirSync(join(app, 'assets'));
+    writeFileSync(join(app, 'assets/icon.png'), 'not really a png');
+    // 'outside' points ios.icon out of the project folder, which must never be served.
+    writeFileSync(join(app, 'app.json'), JSON.stringify({ expo: { icon: './assets/icon.png', ...(icon === 'outside' ? { ios: { icon: '../../escape.png' } } : {}) } }));
+  }
   git(app, 'add', '.');
   git(app, 'commit', '-qm', 'first');
   git(app, 'remote', 'add', 'origin', origin);
@@ -52,7 +58,7 @@ function project(name) {
 }
 
 before(async () => {
-  writeFileSync(join(dir, 'projects.conf'), `my_app|${project('my_app')}\npushed.app|${project('pushed.app')}\n`);
+  writeFileSync(join(dir, 'projects.conf'), `my_app|${project('my_app', { icon: 'outside' })}\npushed.app|${project('pushed.app', { icon: 'inside' })}\n`);
   // Build on push: a rule for a project that has since been removed, ahead of one with a new commit to build.
   writeFileSync(join(dir, 'ui.json'), JSON.stringify({
     triggers: [
@@ -84,6 +90,17 @@ test('a project named with an underscore builds', async () => {
   assert.equal(done.project, 'my_app');
   const { json } = await request(`/api/builds/${created.json.id}/log`);
   assert.match(json.lines.join('\n'), /fake build my_app --profile development --fast --output /);
+});
+
+test('project list carries icons and latest builds', async () => {
+  const { status, json } = await request('/api/projects');
+  assert.equal(status, 200);
+  assert.deepEqual(json.map((item) => [item.name, item.icon]), [['my_app', false], ['pushed.app', true]]);
+});
+
+test('app icons come from app.json, and only from inside the project', async () => {
+  assert.equal((await request('/api/projects/pushed.app/icon')).status, 200);
+  assert.equal((await request('/api/projects/my_app/icon')).status, 404);
 });
 
 test('requests must name this server', async () => {

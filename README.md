@@ -4,10 +4,12 @@ Build your Expo iOS apps on your own Mac, with an EAS-style dashboard you can us
 
 macbuild wraps `eas build --local`: it answers the signing prompts, builds any branch or commit from GitHub in a clean checkout, and uploads to TestFlight. No build credits, no queue.
 
+<img src="docs/dashboard.png" alt="A project's overview: the build running now with its time left, latest builds, health, signing and working copy">
+
 <p>
-  <img src="docs/builds.png" width="250" alt="Build list">
-  <img src="docs/build.png" width="250" alt="Build page with source, details and phase logs">
-  <img src="docs/insights.png" width="250" alt="Insights with build charts">
+  <img src="docs/builds.png" width="250" alt="Build list on an iPhone">
+  <img src="docs/build.png" width="250" alt="A build's details and install button on an iPhone">
+  <img src="docs/insights.png" width="250" alt="Insights with build charts on an iPhone">
 </p>
 
 ## Install
@@ -60,13 +62,14 @@ The IPA lands on your Desktop. Projects are in `~/.config/macbuild/projects.conf
 Install with `--ui` to run the dashboard at login. With Tailscale it's published on your tailnet only, at `https://<your-mac>:8443`. Open it in Safari on your iPhone and add it to your Home Screen.
 
 - Start builds from any branch, commit and `eas.json` profile
+- Follow a build live: its current phase, the time left going by your usual build time, and logs grouped by phase on a timeline
 - See commit, author, PR, GitHub checks, version, channel and signing expiry for each build
-- Live logs grouped by phase, with timings
 - Install dev builds on your phone over the air, or scan a QR code
 - Rebuild, cancel, download the IPA
+- A page for each project's builds, branches, submissions, update channels, signing and devices, environment variable names, and build automation, with Expo's data read-only
 - Build a branch automatically on every push
-- Charts for build activity, speed and success rate
-- Read-only Expo data: submissions, channels, environment variable names, devices
+- Your app's icon from `app.json`, and your Mac's status in the sidebar
+- Charts for build activity, speed, success rate and where the time goes
 - Push notifications when a build finishes
 
 Installing from the page needs HTTPS, which Tailscale provides, and a device in the app's provisioning profile.

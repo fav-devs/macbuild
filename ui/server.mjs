@@ -3,7 +3,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { createReadStream, existsSync, statfsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { cpus, homedir, loadavg, tmpdir, totalmem, uptime } from 'node:os';
+import { cpus, homedir, hostname, loadavg, tmpdir, totalmem, uptime } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -45,11 +45,37 @@ async function git(dir, ...args) {
   try { return (await run('git', ['-C', dir, ...args])).stdout.trim(); } catch { return ''; }
 }
 async function describe(project) {
-  const [branch, commit, subject, dirty] = await Promise.all([
+  const [branch, commit, subject, dirty, top] = await Promise.all([
     git(project.dir, 'branch', '--show-current'), git(project.dir, 'rev-parse', '--short', 'HEAD'),
-    git(project.dir, 'log', '-1', '--format=%s'), git(project.dir, 'status', '--porcelain')]);
-  return { name: project.name, branch, commit, subject, dirty: dirty ? dirty.split('\n').length : 0, lastBuild: allBuilds().find((build) => build.project === project.name) ?? null };
+    git(project.dir, 'log', '-1', '--format=%s'), git(project.dir, 'status', '--porcelain'), git(project.dir, 'rev-parse', '--show-toplevel')]);
+  return {
+    name: project.name, branch, commit, subject, dirty: dirty ? dirty.split('\n').length : 0, repo: top ? await slug(top) : '',
+    icon: Boolean(iconPath(project)), lastBuild: allBuilds().find((build) => build.project === project.name) ?? null,
+  };
 }
+// The app's icon from app.json (expo.ios.icon or expo.icon), so the dashboard can show it. app.config.js isn't run.
+function iconPath(project) {
+  try {
+    const { expo = {} } = JSON.parse(readFileSync(join(project.dir, 'app.json'), 'utf8'));
+    const ios = expo.ios?.icon;
+    const relative = typeof ios === 'string' ? ios : ios?.light ?? expo.icon;
+    if (typeof relative !== 'string') return null;
+    const file = resolve(project.dir, relative);
+    return file.startsWith(`${resolve(project.dir)}/`) && /\.(png|jpe?g)$/i.test(file) && existsSync(file) ? file : null;
+  } catch {
+    return null;
+  }
+}
+// How long a running build will probably take: the median of this project's recent successful builds of the same
+// kind, preferring the same profile.
+const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+function estimate(build) {
+  const done = allBuilds().filter((item) => item.status === 'success' && item.startedAt && item.finishedAt && item.project === build.project && item.action === build.action);
+  const same = done.filter((item) => item.profile === build.profile);
+  const pool = (same.length >= 2 ? same : done).slice(0, 10);
+  return pool.length ? median(pool.map((item) => item.finishedAt - item.startedAt)) : null;
+}
+const withEstimate = (build) => (isActive(build) ? { ...build, estimate: estimate(build) } : build);
 
 const clean = (text) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').split('\n')
   .map((line) => line.split('\r').filter((part) => part.trim()).pop() ?? '')
@@ -210,7 +236,7 @@ async function projectDetail(project) {
   const current = await git(repo, 'branch', '--show-current');
   const behind = current ? Number(await git(repo, 'rev-list', '--count', `HEAD..origin/${current}`)) || 0 : 0;
   return {
-    ...(await describe(project)), repo: repoSlug, refreshing, behind, branches, profiles: easProfiles(project.dir), builds: builds.slice(0, 30),
+    ...(await describe(project)), repo: repoSlug, refreshing, behind, branches, profiles: easProfiles(project.dir), builds: builds.slice(0, 60).map(withEstimate),
     signing: builds.find((build) => build.signing)?.signing ?? null, storeSigning: builds.find((build) => build.signing && !build.installable)?.signing ?? null,
     stats: { total: done.length, passed: done.filter((build) => build.status === 'success').length, median: times[Math.floor(times.length / 2)] ?? 0 },
     triggers: config().triggers.filter((rule) => rule.project === project.name),
@@ -244,6 +270,15 @@ async function notify(build) {
   })));
   if (dead.length) saveConfig({ subscriptions: config().subscriptions.filter((item) => !dead.includes(item.endpoint)) });
 }
+// What this Mac is, for the dashboard: read once, it doesn't change while the server runs.
+let machineInfo = null;
+async function machine() {
+  if (machineInfo) return machineInfo;
+  const out = async (command, args) => { try { return (await run(command, args, { timeout: 5000 })).stdout.trim(); } catch { return ''; } };
+  const [name, chip, macos] = await Promise.all([out('scutil', ['--get', 'ComputerName']), out('sysctl', ['-n', 'machdep.cpu.brand_string']), out('sw_vers', ['-productVersion'])]);
+  machineInfo = { name: name || hostname().replace(/\.local$/, ''), chip: chip || cpus()[0]?.model || '', macos, memory: totalmem() };
+  return machineInfo;
+}
 const tools = {};
 async function toolVersions() {
   if (tools.xcode) return tools;
@@ -259,8 +294,10 @@ async function system() {
   const builds = allBuilds();
   return {
     diskFree: disk.bavail * disk.bsize, diskTotal: disk.blocks * disk.bsize, load: loadavg()[0], cores: cpus().length, memory: totalmem(), uptime: uptime(),
-    battery: battery ? { percent: Number(battery[1]), state: battery[2].trim() } : null, tools: await toolVersions(),
+    battery: battery ? { percent: Number(battery[1]), state: battery[2].trim() } : null, tools: await toolVersions(), machine: await machine(),
+    kept: { builds: builds.length, ipas: builds.filter((build) => !build.expired && build.ipaBytes).length, maxBuilds: KEEP_BUILDS, maxIpas: KEEP_IPAS },
     queued: builds.filter((build) => build.status === 'queued').length, running: builds.find((build) => build.status === 'running')?.id ?? null,
+    current: (() => { const build = builds.find((item) => ['running', 'cancelling'].includes(item.status)); return build ? withEstimate(build) : null; })(),
     ipaBytes: builds.reduce((sum, build) => sum + (build.expired ? 0 : build.ipaBytes ?? 0), 0), push: (config().subscriptions ?? []).length,
     // missing: its project left projects.conf, so the project page can't turn the rule off; settings offers Remove.
     triggers: config().triggers.map((rule) => ({ ...rule, missing: !projects().some((known) => known.name === rule.project) })),
@@ -432,14 +469,25 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/state' && req.method === 'GET') {
     const builds = allBuilds();
-    return json(res, 200, { projects: await Promise.all(projects().map(describe)), builds: builds.slice(0, 200) });
+    return json(res, 200, { projects: await Promise.all(projects().map(describe)), builds: builds.slice(0, 200).map(withEstimate) });
   }
   // The build list alone, for the page that polls it: /api/state also runs git in every project.
-  if (url.pathname === '/api/builds' && req.method === 'GET') return json(res, 200, { builds: allBuilds().slice(0, 200) });
+  if (url.pathname === '/api/builds' && req.method === 'GET') return json(res, 200, { builds: allBuilds().slice(0, 200).map(withEstimate) });
+  // Project names, icons and latest builds, without git: the sidebar asks for this on every page.
+  if (url.pathname === '/api/projects' && req.method === 'GET') {
+    const builds = allBuilds();
+    return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: builds.find((build) => build.project === project.name) ?? null })));
+  }
   if (parts[1] === 'projects' && parts[2] && req.method === 'GET') {
     const project = projects().find((known) => known.name === parts[2]);
     if (!project) return json(res, 404, { error: 'unknown project' });
     if (parts[3] === 'commits') return json(res, 200, await commits(project, url.searchParams.get('branch') ?? ''));
+    if (parts[3] === 'icon') {
+      const file = iconPath(project);
+      if (!file) { res.writeHead(404, { 'cache-control': 'max-age=300' }); return res.end(); }
+      res.writeHead(200, { 'content-type': /\.png$/i.test(file) ? 'image/png' : 'image/jpeg', 'cache-control': 'max-age=3600' });
+      return createReadStream(file).pipe(res);
+    }
     if (parts[3] === 'expo') {
       if (url.searchParams.has('refresh')) expoCache.delete(project.name);
       return json(res, 200, await expo(project));
@@ -500,9 +548,9 @@ async function api(req, res, url) {
         const end = text.lastIndexOf('\n');
         if (end >= 0) { lines = clean(text.slice(0, end)); nextOffset = start + Buffer.byteLength(text.slice(0, end + 1)); }
       }
-      return json(res, 200, { build: read(id), lines, next: nextOffset });
+      return json(res, 200, { build: withEstimate(read(id)), lines, next: nextOffset });
     }
-    if (!parts[3] && req.method === 'GET') return json(res, 200, read(id));
+    if (!parts[3] && req.method === 'GET') return json(res, 200, withEstimate(read(id)));
   }
   return json(res, 404, { error: 'not found' });
 }
