@@ -44,7 +44,7 @@ Point your agent at this repo:
 
 > Set up macbuild on this Mac by following https://github.com/fav-devs/macbuild/blob/main/AGENTS.md
 
-`macbuild <name>` already waits until that CLI build finishes, and the dashboard lists it with the rest. For a job that's already running, run `macbuild wait` (or `macbuild wait <id>`). `--json` prints one object when it ends; `--follow` streams the log. `macbuild mcp` is a stdio MCP server with wait, show, builds and log. `macbuild ask` sends a failed build to T3 Code in that app’s folder (`--codex` uses Codex).
+`macbuild <name>` already waits until that CLI build finishes, and the dashboard lists it with the rest. For a job that's already running, run `macbuild wait` (or `macbuild wait <id>`). `--json` prints one object when it ends; `--follow` streams the log. `macbuild mcp` is a stdio MCP server with wait, show, builds and log. `macbuild ask` sends a failed build to T3 Code in that app’s folder. The dashboard Settings page picks the default model; `--codex` or `--model` override it.
 
 ## Use
 
@@ -73,7 +73,7 @@ macbuild myapp --profile preview --fast       # any eas.json profile, reusing co
 | `--fast` | Keep one work folder per app and profile and turn on Xcode's compilation cache, so later builds reuse compiled output. |
 | `--output PATH` | Where the build goes. Default: your Desktop. |
 
-When a build fails, macbuild prints the likely cause and how to fix it if it recognises the error: a device missing from the provisioning profile, a CocoaPods conflict, an expired certificate, the wrong Java for Gradle, and more. Send that log to T3 Code in the project folder with `macbuild ask`, or `macbuild ask <id> --codex` for Codex. The dashboard has the same buttons on a failed build.
+When a build fails, macbuild prints the likely cause and how to fix it if it recognises the error: a device missing from the provisioning profile, a CocoaPods conflict, an expired certificate, the wrong Java for Gradle, and more. Send that log to T3 Code in the project folder with `macbuild ask`. The dashboard Settings page sets the default model; `--codex` or `--model` override it.
 
 Managing projects:
 

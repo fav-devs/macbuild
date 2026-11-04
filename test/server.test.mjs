@@ -296,7 +296,17 @@ test('settings are checked, and the webhook stays secret', async () => {
   const saved = await request('/api/settings', { method: 'POST', body: { appleTeam: 'ABCDE12345' } });
   assert.equal(saved.json.appleTeam, 'ABCDE12345');
   const { json } = await request('/api/system');
-  assert.deepEqual(json.settings, { webhook: `127.0.0.1:${hookServer.address().port}`, githubStatus: true, appleTeam: 'ABCDE12345', autoInstall: 'off' });
+  const { askChoices, ...rest } = json.settings;
+  assert.deepEqual(rest, {
+    webhook: `127.0.0.1:${hookServer.address().port}`, githubStatus: true, appleTeam: 'ABCDE12345',
+    autoInstall: 'off', askProvider: '', askModel: '',
+  });
+  assert.ok(askChoices.some((item) => item.model === 'grok-4.6'));
+  assert.equal((await request('/api/settings', { method: 'POST', body: { askProvider: 'grok', askModel: 'nope' } })).status, 400);
+  const ask = await request('/api/settings', { method: 'POST', body: { askProvider: 'grok', askModel: 'grok-4.7' } });
+  assert.equal(ask.status, 200);
+  assert.equal(ask.json.askProvider, 'grok');
+  assert.equal(ask.json.askModel, 'grok-4.7');
 });
 
 test('a finished IPA can be installed on a paired iPhone', async () => {
@@ -443,6 +453,11 @@ exit 0
   const logged = await request(`/api/builds/${id}/log?from=0`);
   assert.equal(logged.json.build.ask.threadId, 't-ask');
   assert.equal(logged.json.build.ask.link, 'http://127.0.0.1:3773/t-ask');
+  writeFileSync(join(dir, 't3-ask-calls'), '');
+  assert.equal((await request('/api/settings', { method: 'POST', body: { askProvider: 'grok', askModel: 'grok-4.7' } })).status, 200);
+  const again = await request(`/api/builds/${id}/ask`, { method: 'POST', body: {} });
+  assert.equal(again.status, 200, JSON.stringify(again.json));
+  assert.match(readFileSync(join(dir, 't3-ask-calls'), 'utf8'), /--provider grok --model grok-4\.7 /);
 });
 
 test('the dashboard starts Tailscale and publishes Serve', async () => {

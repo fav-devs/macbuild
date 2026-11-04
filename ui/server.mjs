@@ -13,7 +13,7 @@ import { diagnose } from '../lib/diagnose.mjs';
 import { listDevices, pickDevice, preferredDeviceId, tryInstall } from '../lib/device.mjs';
 import { readProfiles } from '../lib/profile.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
-import { startAsk } from '../lib/ask.mjs';
+import { ASK_CHOICES, parseAskChoice, startAsk } from '../lib/ask.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -368,9 +368,15 @@ async function toolVersions() {
 const AUTO_INSTALL = new Set(['off', 'wifi', 'always']);
 const autoInstallMode = () => (AUTO_INSTALL.has(config().autoInstall) ? config().autoInstall : 'off');
 const settingsView = () => {
-  const { webhook, githubStatus, appleTeam } = config();
+  const { webhook, githubStatus, appleTeam, askProvider, askModel } = config();
+  const ask = ASK_CHOICES.find((item) => item.provider === askProvider && item.model === askModel)
+    || ASK_CHOICES.find((item) => item.model === askModel)
+    || { provider: '', model: '' };
   // The webhook's host only: the rest of its URL is a secret.
-  return { webhook: webhook ? hostOf(webhook) || 'set' : '', githubStatus: Boolean(githubStatus), appleTeam: appleTeam ?? '', autoInstall: autoInstallMode() };
+  return {
+    webhook: webhook ? hostOf(webhook) || 'set' : '', githubStatus: Boolean(githubStatus), appleTeam: appleTeam ?? '',
+    autoInstall: autoInstallMode(), askProvider: ask.provider, askModel: ask.model, askChoices: ASK_CHOICES,
+  };
 };
 
 const UI_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.ui.plist');
@@ -1018,7 +1024,7 @@ async function rules(req, res) {
   return json(res, 200, { triggers });
 }
 async function settings(req, res) {
-  const { webhook, githubStatus, appleTeam, autoInstall } = await body(req);
+  const { webhook, githubStatus, appleTeam, autoInstall, askProvider, askModel } = await body(req);
   const changes = {};
   if (webhook !== undefined) {
     if (webhook && !/^https:\/\/[^\s/]+\/\S*$/.test(webhook)) return json(res, 400, { error: 'The webhook URL has to start with https://' });
@@ -1033,6 +1039,16 @@ async function settings(req, res) {
   if (autoInstall !== undefined) {
     if (!AUTO_INSTALL.has(autoInstall)) return json(res, 400, { error: 'Install on iPhone is off, wifi, or always.' });
     changes.autoInstall = autoInstall === 'off' ? undefined : autoInstall;
+  }
+  if (askProvider !== undefined || askModel !== undefined) {
+    if (!askProvider && !askModel) { changes.askProvider = undefined; changes.askModel = undefined; }
+    else {
+      const ask = ASK_CHOICES.find((item) => item.provider === askProvider && item.model === askModel)
+        || ASK_CHOICES.find((item) => item.model === askModel);
+      if (!ask) return json(res, 400, { error: 'Unknown agent model.' });
+      changes.askProvider = ask.provider;
+      changes.askModel = ask.model;
+    }
   }
   saveConfig(changes);
   return json(res, 200, settingsView());
@@ -1133,7 +1149,15 @@ async function api(req, res, url) {
       const project = projects().find((known) => known.name === old.project);
       if (!project) return json(res, 404, { error: 'unknown project' });
       const { provider, model } = await body(req).catch(() => ({}));
-      const result = await startAsk({ build: old, dir: project.dir, provider: provider === 'codex' ? 'codex' : (provider || ''), model: model || '', wait: false, open: true });
+      const chosen = parseAskChoice(provider, model);
+      if (chosen.error) return json(res, 400, { error: chosen.error });
+      const fallback = parseAskChoice(config().askProvider, config().askModel);
+      const result = await startAsk({
+        build: old, dir: project.dir,
+        provider: chosen.provider || fallback.provider || '',
+        model: chosen.model || fallback.model || '',
+        wait: false, open: true,
+      });
       if (result.threadId) save({ ...read(id), ask: { threadId: result.threadId, title: result.title, link: result.link, status: result.status, provider: result.provider || '', at: Date.now() } });
       return json(res, result.error && !result.threadId ? 400 : 200, result);
     }

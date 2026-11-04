@@ -32,7 +32,7 @@ The first build for a new app can stop on signing prompts macbuild doesn't know.
 | Only rebuild if native code changed | add `--skip-unchanged` (development and simulator builds) |
 | Local files that a GitHub `--ref` build would skip | `macbuild commit <name> --push` (T3 CLI splits related files; never `git add .`) |
 | To wait for a dashboard job | `macbuild wait` (or `macbuild wait <id\|project>`). Add `--json` for one object, `--follow` to stream the log. |
-| A failed build sent to T3 Code / Codex in the project folder | `macbuild ask` (or `macbuild ask <id\|project>`). Add `--codex` to use Codex. |
+| A failed build sent to T3 Code in the project folder | `macbuild ask` (or `macbuild ask <id\|project>`). Uses the dashboard default model, or `--codex` / `--model`. |
 
 Rules:
 

@@ -453,6 +453,11 @@ a.pcard:hover { border-color: var(--line-2); box-shadow: var(--pop); }
 .table .last .st, .table .last .st .i { width: 15px; height: 15px; }
 .table-wrap { overflow-x: auto; }
 #tip { position: fixed; z-index: 40; display: none; max-width: 220px; padding: 7px 10px; border-radius: 8px; background: var(--primary); color: var(--on-primary); font-size: 12px; line-height: 1.4; pointer-events: none; box-shadow: var(--pop); }
+.overlay { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: rgb(12 12 16 / .45); }
+.sheet { width: min(400px, 100%); display: grid; gap: 14px; padding: 18px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); box-shadow: var(--pop); }
+.sheet h2 { font-size: 16px; font-weight: 650; }
+.sheet-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.sheet .toggle { padding: 0; }
 #tip b { display: block; font-size: 13.5px; font-weight: 650; }
 
 /* settings */

@@ -6,10 +6,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnose } from '../lib/diagnose.mjs';
-import { pickAskJob, promptForAsk, titleOfAsk } from '../lib/ask.mjs';
+import { parseAskChoice, pickAskJob, promptForAsk, titleOfAsk } from '../lib/ask.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const MACBUILD = join(ROOT, 'bin/macbuild');
+
+test('parseAskChoice fills a known Grok or Codex model', () => {
+  assert.deepEqual(parseAskChoice('grok', 'grok-4.7'), { provider: 'grok', model: 'grok-4.7' });
+  assert.deepEqual(parseAskChoice('codex', ''), { provider: 'codex', model: 'gpt-6.1-sol' });
+  assert.deepEqual(parseAskChoice('', ''), { provider: '', model: '' });
+});
 
 test('pickAskJob prefers a failed job for a project name', () => {
   const items = [
@@ -82,6 +88,11 @@ exit 0
   const grok = spawnSync(MACBUILD, ['ask', id], { env: { ...env, MACBUILD_T3: join(home, 'bin/t3') }, encoding: 'utf8', timeout: 15000 });
   assert.equal(grok.status, 0, grok.stdout + grok.stderr);
   assert.match(readFileSync(join(home, 't3-calls'), 'utf8'), /thread start --json --title macbuild fix 20260104162904-myapp --provider grok --model grok-4\.6 /);
+  writeFileSync(join(home, '.config/macbuild/ui.json'), JSON.stringify({ askProvider: 'grok', askModel: 'grok-4.7' }));
+  writeFileSync(join(home, 't3-calls'), '');
+  const remembered = spawnSync(MACBUILD, ['ask', id], { env: { ...env, MACBUILD_T3: join(home, 'bin/t3') }, encoding: 'utf8', timeout: 15000 });
+  assert.equal(remembered.status, 0, remembered.stdout + remembered.stderr);
+  assert.match(readFileSync(join(home, 't3-calls'), 'utf8'), /--provider grok --model grok-4\.7 /);
   writeFileSync(join(home, 't3-calls'), '');
   const started = spawnSync(MACBUILD, ['ask', id, '--codex'], { env: { ...env, MACBUILD_T3: join(home, 'bin/t3') }, encoding: 'utf8', timeout: 15000 });
   assert.equal(started.status, 0, started.stdout + started.stderr);

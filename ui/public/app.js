@@ -141,6 +141,24 @@ async function post(path, body) {
   const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify(body ?? {}) });
   return response.json().catch(() => ({}));
 }
+const ASK_CHOICES = [
+  { provider: 'grok', model: 'grok-4.6', label: 'Grok 4.6' },
+  { provider: 'grok', model: 'grok-4.7', label: 'Grok 4.7' },
+  { provider: 'grok', model: 'grok-4.5', label: 'Grok 4.5' },
+  { provider: 'codex', model: 'gpt-6.1-sol', label: 'Codex' },
+];
+const askChoices = () => (shell.system?.settings?.askChoices?.length ? shell.system.settings.askChoices : ASK_CHOICES);
+const askValue = (item) => `${item.provider}:${item.model}`;
+const parseAskValue = (value) => {
+  const [provider, ...rest] = String(value || '').split(':');
+  return { provider, model: rest.join(':') };
+};
+function askOptions(selected = '') {
+  return askChoices().map((item) => {
+    const value = askValue(item);
+    return `<option value="${esc(value)}" ${value === selected ? 'selected' : ''}>${esc(item.label)}</option>`;
+  }).join('');
+}
 // Runs work again after ms (a number, or a function returning one) until the page changes or work returns 'stop'.
 function every(ms, work) {
   const token = routing.token;
@@ -465,7 +483,47 @@ const installUrl = (build) => `itms-services://?action=download-manifest&url=${e
 function askOpen(build, cls) {
   if (build.ask?.link) return `<a class="${cls}" href="${esc(build.ask.link)}" target="_blank" rel="noreferrer">${cls.includes('sm') ? '' : icon('braces')}Open in T3 Code</a>`;
   if (build.ask?.threadId) return `<span class="faint">Sent to agent</span>`;
-  return `<button class="${cls}" data-ask="${esc(build.id)}">${cls.includes('sm') ? '' : icon('braces')}Send to agent</button>`;
+  return `<button class="${cls}" data-ask="${esc(build.id)}" data-project="${esc(build.project)}">${cls.includes('sm') ? '' : icon('braces')}Send to agent</button>`;
+}
+function closeAskModal() { $('#ask-modal')?.remove(); }
+async function sendAsk(id, { provider, model, remember = false }) {
+  if (remember && provider) {
+    const saved = await post('/api/settings', { askProvider: provider, askModel: model });
+    if (shell.system) shell.system.settings = { ...(shell.system.settings || {}), ...saved };
+  }
+  const result = await post(`/api/builds/${id}/ask`, { provider, model });
+  if (result.error && !result.threadId) flash(result.error, true);
+  else { flash(result.link ? 'Opened in T3 Code' : 'Sent to agent'); route(); }
+  return result;
+}
+function showAskModal({ id, project }) {
+  closeAskModal();
+  const settings = shell.system?.settings || {};
+  const selected = settings.askModel ? `${settings.askProvider}:${settings.askModel}` : askValue(askChoices()[0]);
+  const box = document.createElement('div');
+  box.id = 'ask-modal';
+  box.className = 'overlay';
+  box.innerHTML = `<form class="sheet" id="ask-form">
+    <h2>Send to agent</h2>
+    <label class="field"><span>App</span><input class="input" value="${esc(project)}" readonly></label>
+    <label class="field"><span>Model</span><select class="select" name="model">${askOptions(selected)}</select></label>
+    <label class="toggle"><span>Remember as default</span><input class="switch" type="checkbox" name="remember" checked></label>
+    <div class="sheet-actions"><button type="button" class="btn" id="ask-cancel">Cancel</button><button class="btn primary">Send</button></div>
+  </form>`;
+  document.body.append(box);
+  const onKey = (event) => { if (event.key === 'Escape') finish(); };
+  const finish = () => { window.removeEventListener('keydown', onKey); closeAskModal(); };
+  window.addEventListener('keydown', onKey);
+  box.addEventListener('click', (event) => { if (event.target === box) finish(); });
+  $('#ask-cancel', box).onclick = finish;
+  $('#ask-form', box).onsubmit = async (event) => {
+    event.preventDefault();
+    const send = box.querySelector('.btn.primary');
+    send.disabled = true;
+    const { provider, model } = parseAskValue(event.target.model.value);
+    await sendAsk(id, { provider, model, remember: event.target.remember.checked });
+    finish();
+  };
 }
 function installNote(build) {
   const installed = build.installed;
@@ -503,7 +561,7 @@ function buildAlert(build) {
     return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}</b>
       ${build.hint ? `<p class="fix"><strong>Likely cause: ${esc(build.hint.title)}.</strong> ${fixHtml(build.hint.fix)}</p>` : ''}
       ${build.reason ? `<code>${esc(build.reason)}</code>` : ''}
-      <div class="inline">${askOpen(build, 'btn sm')}<button class="btn sm ghost" data-ask="${esc(build.id)}" data-provider="codex">Codex</button><button class="btn sm" data-show-failure>Show the log</button></div></div></div>`;
+      <div class="inline">${askOpen(build, 'btn sm')}<button class="btn sm" data-show-failure>Show the log</button></div></div></div>`;
   }
   if (build.status === 'skipped') {
     return `<div class="callout info" style="margin-bottom:20px">${icon('skip')}<div><b>Reused an earlier build</b>${build.reusedFrom ? `<span class="muted"><a class="link" href="#/build/${esc(build.reusedFrom)}">Open it</a></span>` : ''}</div></div>`;
@@ -1151,6 +1209,12 @@ async function settingsPage() {
           <div class="seg" role="group" aria-label="Install on iPhone" id="auto-install">${[['off', 'Off'], ['wifi', 'Wi-Fi'], ['always', 'Always']].map(([value, label]) => `<button type="button" data-auto-install="${value}" class="${(settings.autoInstall || 'off') === value ? 'on' : ''}">${label}</button>`).join('')}</div></div>
         <a class="row compact" href="#/setup"><span class="main"><span class="title">Setup guide</span></span>${icon('right', 'sm')}</a>
       </div>`)}
+      ${card('Agent', 'braces', `<div class="setting"><div><b>Default model</b><small>Send to agent uses this and opens T3 Code in that app’s folder.</small></div>
+        <select class="select" id="ask-model" aria-label="Default agent model">
+          <option value="">Ask each time</option>
+          ${askOptions(settings.askModel ? `${settings.askProvider}:${settings.askModel}` : '')}
+        </select>
+        <p class="hint" id="ask-note"></p></div>`)}
     </div><div class="stack">
       ${card('Integrations', 'link', `<div class="rows">
         <label class="toggle"><span><b>GitHub checks</b><small>${tools.gh ? '' : 'Run gh auth login'}</small></span><input class="switch" type="checkbox" id="gh-status" ${settings.githubStatus ? 'checked' : ''} ${tools.gh || settings.githubStatus ? '' : 'disabled'}></label>
@@ -1198,6 +1262,16 @@ async function settingsPage() {
     if (!button) return;
     autoInstall.querySelectorAll('button').forEach((item) => item.classList.toggle('on', item === button));
     await saveSetting({ autoInstall: button.dataset.autoInstall }, $('#hook-note'));
+  };
+  const askModel = $('#ask-model');
+  if (askModel) askModel.onchange = async () => {
+    const { provider, model } = parseAskValue(askModel.value);
+    const note = $('#ask-note');
+    if (await saveSetting({ askProvider: provider, askModel: model }, note)) {
+      if (shell.system) shell.system.settings = { ...(shell.system.settings || {}), askProvider: provider, askModel: model };
+      note.className = 'hint ok';
+      note.textContent = provider ? 'Saved.' : 'Ask each time.';
+    }
   };
   $('#hook-form').onsubmit = async (event) => { event.preventDefault(); if ($('#hook').value && await saveSetting({ webhook: $('#hook').value.trim() }, $('#hook-note'))) route(); };
   $('#team-form').onsubmit = async (event) => {
@@ -1325,11 +1399,12 @@ document.addEventListener('click', async (event) => {
     if (created.id) location.hash = `#/build/${created.id}`;
   }
   if (ask) {
-    ask.disabled = true;
-    const result = await post(`/api/builds/${ask.dataset.ask}/ask`, { provider: ask.dataset.provider || '' });
-    ask.disabled = false;
-    if (result.error && !result.threadId) flash(result.error, true);
-    else { flash(result.link ? 'Opened in T3 Code' : 'Sent to agent'); route(); }
+    const settings = shell.system?.settings ?? {};
+    if (settings.askProvider && settings.askModel) {
+      ask.disabled = true;
+      await sendAsk(ask.dataset.ask, { provider: settings.askProvider, model: settings.askModel });
+      ask.disabled = false;
+    } else showAskModal({ id: ask.dataset.ask, project: ask.dataset.project || '' });
   }
   if (remove) { await post('/api/triggers', { project: remove.dataset.project, on: remove.dataset.on, branch: remove.dataset.branch, enabled: false }); route(); }
 });
