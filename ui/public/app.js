@@ -70,7 +70,8 @@ const PROJECT_SECTIONS = {
   devices: { label: 'Devices', icon: 'phone', group: 'Manage', target: 'project-devices' },
 };
 let projectSectionHash = null;
-const projectLocation = () => location.hash.match(/^#\/p\/([\w-]+)(?:\/([\w-]+))?(?:\?.*)?$/);
+// Project names: letters, digits, '.', '_' and '-' (macbuild add checks).
+const projectLocation = () => location.hash.match(/^#\/p\/([\w.-]+)(?:\/([\w-]+))?(?:\?.*)?$/);
 const projectSectionOptions = (name, selected) => Object.entries(PROJECT_SECTIONS).map(([key, section]) => `<option value="#/p/${esc(name)}${key === 'overview' ? '' : `/${key}`}" ${selected === key ? 'selected' : ''}>${esc(section.label)}</option>`).join('');
 
 const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -176,7 +177,7 @@ const count = (value, axis) => (axis ? String(Math.round(value)) : `${value} bui
 const stepFor = (max) => [1, 2, 5, 10, 20, 50].find((step) => max / step <= 3) ?? 100;
 
 async function home(localOnly = false) {
-  const builds = localOnly && homeBuilds ? homeBuilds : (await get('/api/state')).builds;
+  const builds = localOnly && homeBuilds ? homeBuilds : (await get('/api/builds')).builds;
   homeBuilds = builds;
   const words = query.toLowerCase();
   const shown = builds.filter((build) => filter === 'all' || (filter === 'active' && active(build)) || (filter === 'failed' && build.status === 'failed')
@@ -279,7 +280,7 @@ async function project(name, section = 'overview') {
       ${projectCard('Production builds', 'hammer', recentBuilds(store, 'iOS App Store build', 'No production builds yet'), history)}
       ${projectCard('TestFlight submissions', 'send', '<div id="project-submissions"><div class="empty">Loading submissions…</div></div>', '', 'project-submissions-card')}
       ${projectCard('Update channels', 'bolt', '<div id="project-channels"><div class="empty">Loading channels…</div></div>', '', 'project-channels-card')}
-      ${projectCard('Build automation', 'rebuild', data.triggers.length ? data.triggers.map((rule) => `<a class="item row" href="#/p/${esc(name)}/new?branch=${encodeURIComponent(rule.branch)}"><span class="lead">${icon('bolt', 'sm')}</span><span class="main"><div class="title">Build on push</div><div class="sub">${esc(rule.branch)} · ${esc(rule.profile)}</div></span>${icon('right', 'sm')}</a>`).join('') : `${projectEmpty('rebuild', 'You’re in control', 'Build when you’re ready, or enable build-on-push.')}<a class="card-footer-link" href="#/p/${esc(name)}/new">Configure a build ${icon('right', 'sm')}</a>`, '', 'project-automation')}
+      ${projectCard('Build automation', 'rebuild', data.triggers.length ? data.triggers.map((rule) => `<a class="item row" href="#/p/${esc(name)}/new?branch=${encodeURIComponent(rule.branch)}"><span class="lead">${icon('bolt', 'sm')}</span><span class="main"><div class="title">Build on push</div><div class="sub">${esc(rule.branch)} · ${esc(rule.profile)}</div>${rule.error ? `<div class="sub warn">${esc(rule.error)}</div>` : ''}</span>${icon('right', 'sm')}</a>`).join('') : `${projectEmpty('rebuild', 'You’re in control', 'Build when you’re ready, or enable build-on-push.')}<a class="card-footer-link" href="#/p/${esc(name)}/new">Configure a build ${icon('right', 'sm')}</a>`, '', 'project-automation')}
       ${projectCard('Signing & local source', 'shield', `<dl class="facts project-signing-facts">
       ${fact('Dev profile', expiry(signing), 'shield')}${fact('Devices', signing ? String(signing.devices) : '—', 'phone')}${storeSigning ? fact('Store profile', expiry(storeSigning), 'shield') : ''}
       ${fact('Branch', esc(data.branch || 'Detached HEAD'), 'branch')}${fact('Commit', esc(data.commit), 'commit')}${data.dirty ? fact('Working copy', `${data.dirty} changed files`) : ''}</dl>`, '', 'project-signing')}
@@ -355,7 +356,7 @@ async function start(name, branch) {
     <div class="buttons" style="margin-top:0"><button class="primary" id="go">${icon('hammer')}Start build</button></div>
     <p class="hint bad" id="error"></p>
     <h2>Automatic builds</h2><div class="list"><label class="setrow">${icon('bolt')}Build on every push<input class="switch" type="checkbox" id="auto" ${rule ? 'checked' : ''}></label></div>
-    <p class="hint" id="autoNote">${rule ? `On, using ${esc(rule.profile)}${rule.submit ? ', then TestFlight' : ''}.` : 'Uses the branch and profile above. Checks GitHub every minute.'}</p>`;
+    <p class="hint" id="autoNote">${rule ? `On, using ${esc(rule.profile)}${rule.submit ? ', then TestFlight' : ''}.${rule.error ? ` <span class="warn">Last check: ${esc(rule.error)}.</span>` : ''}` : 'Uses the branch and profile above. Checks GitHub every minute.'}</p>`;
   const pick = (id) => document.querySelector(`#${id}`);
   const loadCommits = async () => {
     const value = pick('branch').value;
@@ -532,7 +533,11 @@ async function settings() {
       ${row('disk', 'Free space', `${gb(data.diskFree)} of ${gb(data.diskTotal)}`)}${data.battery ? row('battery', 'Battery', `${data.battery.percent}% · ${data.battery.state}`) : ''}
       ${row('cpu', 'Load', `${data.load.toFixed(1)} on ${data.cores} cores`)}${row('clock', 'Up', hours > 47 ? `${Math.floor(hours / 24)} days` : `${hours} hours`)}
       ${row('hammer', 'Queue', data.running ? `Building, ${data.queued} waiting` : `${data.queued} waiting`)}${row('download', 'Saved IPAs', size(data.ipaBytes) || '0 MB')}</div></section>
-    <section><h2>Automatic builds</h2><div class="list">${data.triggers.length ? data.triggers.map((rule) => `<a class="setrow" href="#/p/${esc(rule.project)}/new?branch=${encodeURIComponent(rule.branch)}">${icon('bolt')}${esc(rule.project)}<span class="v">${esc(rule.branch)} · ${esc(rule.profile)}</span></a>`).join('') : '<div class="empty">None. Turn it on when starting a build.</div>'}</div></section>
+    <section><h2>Automatic builds</h2><div class="list">${data.triggers.length ? data.triggers.map((rule) => {
+      const text = `${icon('bolt')}${esc(rule.project)}<span class="v">${esc(rule.branch)} · ${esc(rule.profile)}${rule.error ? `<br><span class="warn">${esc(rule.error)}</span>` : ''}</span>`;
+      return rule.missing ? `<div class="setrow">${text}<button class="remove-rule" data-project="${esc(rule.project)}" data-branch="${esc(rule.branch)}">Remove</button></div>`
+        : `<a class="setrow" href="#/p/${esc(rule.project)}/new?branch=${encodeURIComponent(rule.branch)}">${text}</a>`;
+    }).join('') : '<div class="empty">None. Turn it on when starting a build.</div>'}</div></section>
     <section><h2>Tools</h2><div class="list">${row('hammer', 'Xcode', data.tools.xcode || '—')}${row('sub', 'EAS CLI', data.tools.eas || '—')}${row('cpu', 'Node', data.tools.node)}</div></section></div>`;
   const toggle = document.querySelector('#push');
   if (toggle) toggle.onchange = () => togglePush(toggle.checked, document.querySelector('#pushNote'));
@@ -547,7 +552,7 @@ function route() {
   clearTimeout(timer); hideTip(); renderTabs();
   const hash = location.hash;
   const build = hash.match(/^#\/build\/([0-9a-z-]+)$/);
-  const fresh = hash.match(/^#\/p\/([\w-]+)\/new(?:\?branch=(.+))?$/);
+  const fresh = hash.match(/^#\/p\/([\w.-]+)\/new(?:\?branch=(.+))?$/);
   const page = projectLocation();
   const section = page?.[2] ?? 'overview';
   const projectPage = page && Object.hasOwn(PROJECT_SECTIONS, section);
@@ -579,6 +584,8 @@ document.addEventListener('click', async (event) => {
   const area = event.target.closest('[data-scope]');
   const cancel = event.target.closest('[data-cancel]');
   const rebuild = event.target.closest('[data-rebuild]');
+  const removeRule = event.target.closest('.remove-rule');
+  if (removeRule) { await post('/api/triggers', { project: removeRule.dataset.project, branch: removeRule.dataset.branch, enabled: false }); route(); return; }
   if (chip) { filter = chip.dataset.filter; document.querySelectorAll('[data-filter]').forEach((item) => item.classList.toggle('on', item === chip)); home(true); }
   if (area) { scope = area.dataset.scope; insights(); }
   if (cancel && confirm('Cancel this build?')) { await post(`/api/builds/${cancel.dataset.cancel}/cancel`); route(); }

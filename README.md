@@ -51,7 +51,9 @@ macbuild scan
 macbuild doctor
 ```
 
-The IPA lands on your Desktop. Projects are in `~/.config/macbuild/projects.conf`, settings in `~/.config/macbuild/env`.
+The IPA lands on your Desktop. Projects are in `~/.config/macbuild/projects.conf`, settings in `~/.config/macbuild/env`. Project names use letters, digits, `.`, `_` and `-`.
+
+`--testflight` submits with the `eas.json` submit profile named like the build profile, or `production` if there isn't one.
 
 ## Web UI
 
@@ -71,17 +73,17 @@ Installing from the page needs HTTPS, which Tailscale provides, and a device in 
 
 ## Security
 
-**The web UI has no login.** Anyone who can reach it can start builds and download your IPAs. It listens on `127.0.0.1` and is meant to be shared only through your private tailnet. Never put it on the public internet, and don't turn on Tailscale Funnel for it.
+**The web UI has no login.** Anyone who can reach it can start builds and download your IPAs. It listens on `127.0.0.1` and is meant to be shared only through your private tailnet. Never put it on the public internet, and don't turn on Tailscale Funnel for it. It answers only requests addressed to `localhost`, `127.0.0.1` or a `*.ts.net` name, which stops other websites from reaching it through DNS rebinding. To use another name, list it in `MACBUILD_UI_HOSTS` (comma-separated) in `~/Library/LaunchAgents/local.macbuild.ui.plist`.
 
 Signing credentials stay with EAS and your Mac. Your Apple password, if you set one, is read from a file you choose. Environment variable values never reach the UI.
 
 ## Good to know
 
-- Builds run one at a time and use your whole Mac.
+- Builds run one at a time and use your whole Mac. A build started while another is running, from the terminal, an agent or the web UI, waits for it.
 - `--testflight` uses `eas submit`, so Expo's servers do the upload to Apple. The build itself is local.
 - macbuild still uses your Expo account for credentials and project settings. It replaces EAS's build machines, not the rest of EAS.
 - iOS only for now.
-- `--guard` wraps the global `eas` command so `eas build` needs `--local`. It doesn't stop `npx eas-cli`. Remove it with `install.sh --unguard`, and run `--guard` again after updating `eas-cli`.
+- `--guard` wraps the global `eas` command so `eas build` needs `--local`, and `eas build:dev`, `build:resign` and `workflow:run` are refused. It doesn't stop `npx eas-cli`. Remove it with `install.sh --unguard`, and run `--guard` again after updating `eas-cli`.
 
 ## Uninstall
 

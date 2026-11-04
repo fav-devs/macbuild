@@ -1,11 +1,14 @@
 #!/bin/bash
 # Installed over the global `eas` command: this Mac builds locally, never on EAS cloud. The real CLI is eas.real.
 self=$(cd "$(dirname "$0")" && pwd)
-if [ "${1:-}" = build ] || [ "${1:-}" = workflow:run ]; then
-  local_flag=0; for a in "$@"; do [ "$a" = --local ] && local_flag=1; done
-  if [ "$1" = workflow:run ] || [ $local_flag = 0 ]; then
-    echo "Blocked: no EAS cloud builds on this Mac. Use: macbuild <project> [--install|--testflight]" >&2
-    exit 64
-  fi
+blocked=0
+case "${1:-}" in
+  build) blocked=1; for a in "$@"; do [ "$a" = --local ] && blocked=0; done;;
+  # These run on EAS servers and have no --local.
+  build:dev|build:resign|build:internal|workflow:run) blocked=1;;
+esac
+if [ $blocked = 1 ]; then
+  echo "Blocked: no EAS cloud builds on this Mac. Use: macbuild <project> [--install|--testflight]" >&2
+  exit 64
 fi
 exec "$self/eas.real" "$@"

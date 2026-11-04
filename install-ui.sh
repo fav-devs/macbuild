@@ -16,8 +16,9 @@ cat > "$PLIST" <<PL
 <key>Label</key><string>local.macbuild.ui</string>
 <key>ProgramArguments</key><array><string>$NODE</string><string>$HERE/ui/server.mjs</string></array>
 <key>EnvironmentVariables</key><dict>
-<key>PATH</key><string>$(dirname "$NODE"):$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+<key>PATH</key><string>$(dirname "$NODE"):$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 <key>MACBUILD_UI_PORT</key><string>$PORT</string>
+<key>MACBUILD_UI_HTTPS_PORT</key><string>$HTTPS</string>
 <key>MACBUILD_UI_URL</key><string>$URL</string>
 </dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>

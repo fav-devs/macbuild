@@ -17,6 +17,7 @@ const DATA = process.env.MACBUILD_DATA ?? join(homedir(), '.local/share/macbuild
 const PORT = Number(process.env.MACBUILD_UI_PORT ?? 4180);
 const BIN = process.env.MACBUILD_BIN ?? join(ROOT, 'bin/macbuild');
 const KEEP_IPAS = 10;
+const KEEP_BUILDS = 200;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.css': 'text/css', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const CONFIG = process.env.MACBUILD_CONFIG ?? join(homedir(), '.config/macbuild/ui.json');
 const SUBMIT_MARK = /Scheduling iOS submission|Submitting your app/;
@@ -26,11 +27,15 @@ const dirOf = (id) => join(DATA, id);
 const metaOf = (id) => join(dirOf(id), 'meta.json');
 const validId = (id) => /^[0-9a-z-]+$/.test(id) && existsSync(metaOf(id));
 const read = (id) => JSON.parse(readFileSync(metaOf(id), 'utf8'));
+// Only this server writes meta.json, so the list is read from disk again only after a save or a prune.
+let buildsCache = null;
 const save = (build) => {
   writeFileSync(`${metaOf(build.id)}.tmp`, JSON.stringify(build));
   renameSync(`${metaOf(build.id)}.tmp`, metaOf(build.id));
+  buildsCache = null;
 };
-const allBuilds = () => readdirSync(DATA).filter(validId).map(read).sort((a, b) => b.createdAt - a.createdAt);
+const allBuilds = () => (buildsCache ??= readdirSync(DATA).filter(validId).map(read).sort((a, b) => b.createdAt - a.createdAt));
+const isActive = (build) => ['queued', 'running', 'cancelling'].includes(build.status);
 
 const PROJECTS = process.env.MACBUILD_PROJECTS ?? join(homedir(), '.config/macbuild/projects.conf');
 const projects = () => (existsSync(PROJECTS) ? readFileSync(PROJECTS, 'utf8') : '').split('\n')
@@ -98,10 +103,14 @@ async function inspectIpa(build) {
   }
 }
 function prune() {
-  allBuilds().filter((build) => existsSync(join(dirOf(build.id), 'app.ipa'))).slice(KEEP_IPAS).forEach((build) => {
+  const builds = allBuilds();
+  builds.filter((build) => existsSync(join(dirOf(build.id), 'app.ipa'))).slice(KEEP_IPAS).forEach((build) => {
     rmSync(join(dirOf(build.id), 'app.ipa'), { force: true });
     save({ ...build, installable: false, expired: true });
   });
+  // Older history goes too, logs and all, so the build folder doesn't grow forever.
+  builds.slice(KEEP_BUILDS).filter((build) => !isActive(build)).forEach((build) => rmSync(dirOf(build.id), { recursive: true, force: true }));
+  buildsCache = null;
 }
 
 const config = () => { try { return { triggers: [], ...JSON.parse(readFileSync(CONFIG, 'utf8')) }; } catch { return { triggers: [] }; } };
@@ -164,7 +173,8 @@ async function enqueue({ project, profile, ref, label, submit, trigger }) {
   const pr = branch && repoSlug ? (await gh('pr', 'list', '--repo', repoSlug, '--head', branch, '--state', 'all', '--limit', '1', '--json', 'number,title,url'))?.[0] : null;
   const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
   const build = {
-    id: `${stamp}-${project}`.toLowerCase(), project, action: submit ? 'testflight' : 'build', profile, distribution: chosen.distribution, channel: chosen.channel,
+    // The id keeps to what validId accepts, whatever the project is called (my_app, My.App).
+    id: `${stamp}-${project.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`, project, action: submit ? 'testflight' : 'build', profile, distribution: chosen.distribution, channel: chosen.channel,
     source: ref ? 'github' : 'working', ref: branch, commit, pr: pr ?? null, repo: repoSlug, trigger, status: 'queued', createdAt: Date.now(),
     dirty: ref ? 0 : (await git(repo, 'status', '--porcelain')).split('\n').filter(Boolean).length,
   };
@@ -251,7 +261,9 @@ async function system() {
     diskFree: disk.bavail * disk.bsize, diskTotal: disk.blocks * disk.bsize, load: loadavg()[0], cores: cpus().length, memory: totalmem(), uptime: uptime(),
     battery: battery ? { percent: Number(battery[1]), state: battery[2].trim() } : null, tools: await toolVersions(),
     queued: builds.filter((build) => build.status === 'queued').length, running: builds.find((build) => build.status === 'running')?.id ?? null,
-    ipaBytes: builds.reduce((sum, build) => sum + (build.expired ? 0 : build.ipaBytes ?? 0), 0), push: (config().subscriptions ?? []).length, triggers: config().triggers,
+    ipaBytes: builds.reduce((sum, build) => sum + (build.expired ? 0 : build.ipaBytes ?? 0), 0), push: (config().subscriptions ?? []).length,
+    // missing: its project left projects.conf, so the project page can't turn the rule off; settings offers Remove.
+    triggers: config().triggers.map((rule) => ({ ...rule, missing: !projects().some((known) => known.name === rule.project) })),
   };
 }
 // Read-only Expo data through the CLI, cached so a page view does not cost a round of network calls.
@@ -298,14 +310,44 @@ async function loadExpo(project) {
   expoCache.set(project.name, { at: Date.now(), data });
   return data;
 }
+// Updates one rule in place; its last error is dropped unless changes sets a new one.
+const setTrigger = (rule, changes) => saveConfig({
+  triggers: config().triggers.map((item) => {
+    if (item.project !== rule.project || item.branch !== rule.branch) return item;
+    const { error: _old, ...rest } = item;
+    return { ...rest, ...changes };
+  }),
+});
+let watching = false;
 async function watchPushes() {
-  const { triggers } = config();
-  for (const rule of triggers) {
-    const repo = await repoOf(rule.project);
-    const sha = await headOf(repo, rule.branch);
-    if (!sha || sha === rule.sha) continue;
-    saveConfig({ triggers: config().triggers.map((item) => (item === rule || (item.project === rule.project && item.branch === rule.branch) ? { ...item, sha } : item)) });
-    await enqueue({ project: rule.project, profile: rule.profile, ref: rule.branch, submit: rule.submit, trigger: 'push' });
+  if (watching) return; // a slow fetch must not start a second round that queues the same push again
+  watching = true;
+  try {
+    for (const rule of config().triggers) {
+      // A rule that can't run (project removed, profile renamed) records why and the others carry on. A commit counts
+      // as built only once its build is queued, so a failed attempt is tried again next minute.
+      let error = '';
+      try {
+        if (!projects().some((known) => known.name === rule.project)) error = 'project is no longer in projects.conf';
+        else {
+          const sha = await headOf(await repoOf(rule.project), rule.branch);
+          if (!sha) error = 'could not read this branch from GitHub';
+          else if (sha !== rule.sha) {
+            const build = await enqueue({ project: rule.project, profile: rule.profile, ref: rule.branch, submit: rule.submit, trigger: 'push' });
+            if (build.error) error = `could not start a build: ${build.error}`;
+            else { setTrigger(rule, { sha }); continue; }
+          }
+        }
+      } catch (failure) {
+        error = failure.message;
+      }
+      if (error !== (rule.error ?? '')) {
+        if (error) console.error('watch', rule.project, rule.branch, error);
+        setTrigger(rule, error ? { error } : {});
+      }
+    }
+  } finally {
+    watching = false;
   }
 }
 setInterval(() => watchPushes().catch((error) => console.error('watch', error.message)), 60000);
@@ -313,7 +355,7 @@ setInterval(() => watchPushes().catch((error) => console.error('watch', error.me
 let current = null;
 async function next() {
   if (current) return;
-  const build = allBuilds().reverse().find((candidate) => candidate.status === 'queued');
+  const build = allBuilds().findLast((candidate) => candidate.status === 'queued');
   if (!build) return;
   const args = [build.project, '--profile', build.profile, '--fast', '--output', join(dirOf(build.id), 'app.ipa')];
   if (build.action === 'testflight') args.push('--testflight');
@@ -350,6 +392,15 @@ function cancel(id) {
 for (const build of allBuilds()) {
   if (['running', 'cancelling'].includes(build.status)) save({ ...build, status: 'failed', reason: 'The UI restarted during this build', finishedAt: Date.now() });
 }
+prune();
+
+// DNS rebinding: a web page can point its own domain at 127.0.0.1, which makes its requests same-origin, so they could
+// send the x-macbuild header. Every request has to name this server: loopback, the tailnet name Tailscale serve keeps in
+// the Host header (*.ts.net names only resolve to tailnet addresses), or a host listed in MACBUILD_UI_HOSTS.
+const hostOf = (value) => { try { return new URL(value.includes('://') ? value : `http://${value}`).host; } catch { return ''; } };
+const HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`, hostOf(process.env.MACBUILD_UI_URL ?? ''),
+  ...(process.env.MACBUILD_UI_HOSTS ?? '').split(',').map((host) => hostOf(host.trim()))].filter(Boolean));
+const knownHost = (host = '') => HOSTS.has(host.toLowerCase()) || /^([a-z0-9-]+\.)+ts\.net(:\d+)?$/i.test(host);
 
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
 const xml = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -383,6 +434,8 @@ async function api(req, res, url) {
     const builds = allBuilds();
     return json(res, 200, { projects: await Promise.all(projects().map(describe)), builds: builds.slice(0, 200) });
   }
+  // The build list alone, for the page that polls it: /api/state also runs git in every project.
+  if (url.pathname === '/api/builds' && req.method === 'GET') return json(res, 200, { builds: allBuilds().slice(0, 200) });
   if (parts[1] === 'projects' && parts[2] && req.method === 'GET') {
     const project = projects().find((known) => known.name === parts[2]);
     if (!project) return json(res, 404, { error: 'unknown project' });
@@ -395,13 +448,15 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/triggers' && req.method === 'POST') {
     const { project, branch, profile, submit, enabled } = await body(req);
+    const others = () => config().triggers.filter((rule) => !(rule.project === project && rule.branch === branch));
+    // Turning a rule off works for a project that has since been removed, too.
+    if (!enabled) { const triggers = others(); saveConfig({ triggers }); return json(res, 200, { triggers }); }
     if (!projects().some((known) => known.name === project)) return json(res, 400, { error: 'unknown project' });
-    const others = config().triggers.filter((rule) => !(rule.project === project && rule.branch === branch));
-    if (!enabled) { saveConfig({ triggers: others }); return json(res, 200, { triggers: others }); }
     const repo = await repoOf(project);
     const sha = await headOf(repo, branch);
     if (!sha) return json(res, 400, { error: 'branch not on origin' });
-    const triggers = [...others, { project, branch, profile: profile ?? 'development', submit: Boolean(submit), sha }];
+    // Read again after the network call: the push watcher may have updated another rule meanwhile.
+    const triggers = [...others(), { project, branch, profile: profile ?? 'development', submit: Boolean(submit), sha }];
     saveConfig({ triggers });
     return json(res, 200, { triggers });
   }
@@ -475,6 +530,7 @@ function serve(res, pathname) {
 }
 
 createServer(async (req, res) => {
+  if (!knownHost(req.headers.host)) { res.writeHead(403, { 'content-type': 'text/plain' }); return res.end('unknown host\n'); }
   const url = new URL(req.url, 'http://local');
   try {
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
