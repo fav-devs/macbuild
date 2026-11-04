@@ -226,7 +226,7 @@ for (const [project, options] of history.sort((a, b) => b[1].ago - a[1].ago)) se
 // Automatic builds: every push to notes' main, its pull requests, and recipes to TestFlight every night. All up to date.
 const today = new Date(); const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 writeFileSync(join(DIR, 'ui.json'), JSON.stringify({
-  githubStatus: true,
+  githubStatus: true, setupComplete: true, loginAtLogin: true,
   triggers: [
     { project: 'notes', on: 'push', branch: 'main', profile: 'development', platform: 'ios', submit: false, skipUnchanged: true, sha: notes.commits.main.at(-1).hash },
     { project: 'notes', on: 'pr', profile: 'development', platform: 'ios', submit: false, skipUnchanged: true, prs: { 48: notes.commits['feature/folders'].at(-1).hash } },
@@ -308,7 +308,11 @@ case "$1 $2" in
 esac
 `);
 // The builder: writes a believable log over time, then an IPA. DEMO_BUILD_SECONDS sets how long the compile step runs.
-script('macbuild', `out=""; for a in "$@"; do [ "$prev" = --output ] && out=$a; prev=$a; done
+script('macbuild', `case "$1" in
+  doctor) echo '{"ok":true,"items":[{"id":"macos","label":"macOS","status":"ok","detail":"26.1"},{"id":"xcode","label":"Xcode","status":"ok","detail":"Xcode 26.1"},{"id":"node","label":"node","status":"ok","detail":"v22.17.0"},{"id":"eas-cli","label":"eas-cli","status":"ok","detail":"eas-cli/16.0.0"},{"id":"expo-login","label":"Expo login","status":"ok","detail":"acme"},{"id":"projects","label":"projects","status":"ok","detail":"3 listed"}]}'; exit 0;;
+  scan) exit 0;;
+esac
+out=""; for a in "$@"; do [ "$prev" = --output ] && out=$a; prev=$a; done
 say() { echo "[$1] $2" >> "$MACBUILD_LOG"; }
 for phase in SETUP_WORKINGDIR START_BUILD READ_EAS_JSON READ_PACKAGE_JSON; do say $phase "Starting"; sleep 0.4; done
 say INSTALL_DEPENDENCIES 'Running "npm ci --include=dev"'; sleep 3; say INSTALL_DEPENDENCIES "added 1284 packages in 49s"

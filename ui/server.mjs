@@ -359,6 +359,99 @@ const settingsView = () => {
   // The webhook's host only: the rest of its URL is a secret.
   return { webhook: webhook ? hostOf(webhook) || 'set' : '', githubStatus: Boolean(githubStatus), appleTeam: appleTeam ?? '' };
 };
+
+const UI_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.ui.plist');
+const BAR_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.menubar.plist');
+const BAR_BIN = join(homedir(), '.local/bin/macbuild-menubar');
+const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+const localUrl = () => `http://127.0.0.1:${PORT}`;
+const phoneUrl = () => (/^https:\/\//.test(UI_URL) ? UI_URL : '');
+function plistLogin(file) {
+  try { return /<key>RunAtLoad<\/key>\s*<true\/>/.test(readFileSync(file, 'utf8')); } catch { return false; }
+}
+function setPlistLogin(file, on) {
+  if (!existsSync(file)) return false;
+  const text = readFileSync(file, 'utf8');
+  const next = text.replace(/(<key>RunAtLoad<\/key>\s*)<(true|false)\/>/, `$1<${on ? 'true' : 'false'}/>`);
+  if (next === text) return plistLogin(file) === on;
+  writeFileSync(file, next);
+  return true;
+}
+async function agentLoaded(label) {
+  try { await run('launchctl', ['print', `gui/${uid}/${label}`], { timeout: 4000 }); return true; } catch { return false; }
+}
+let doctorCache = { at: 0, data: null };
+async function doctorReport() {
+  if (Date.now() - doctorCache.at < 15000 && doctorCache.data) return doctorCache.data;
+  try {
+    const { stdout } = await run(BIN, ['doctor', '--json'], { timeout: 25000, maxBuffer: 1 << 20 });
+    const line = stdout.trim().split('\n').filter(Boolean).at(-1);
+    doctorCache = { at: Date.now(), data: JSON.parse(line) };
+  } catch (error) {
+    doctorCache = { at: Date.now(), data: { ok: false, items: [], error: (error.stderr?.toString() || error.message).split('\n')[0] } };
+  }
+  return doctorCache.data;
+}
+const slimBuild = (build) => (build ? { id: build.id, project: build.project, profile: build.profile, status: build.status, subject: build.commit?.subject ?? '' } : null);
+async function setupView() {
+  const cfg = config();
+  const doctor = await doctorReport();
+  const barOn = await agentLoaded('local.macbuild.menubar');
+  return {
+    setupComplete: Boolean(cfg.setupComplete),
+    loginAtLogin: existsSync(UI_PLIST) ? plistLogin(UI_PLIST) : cfg.loginAtLogin !== false,
+    menubar: barOn,
+    menubarInstalled: existsSync(BAR_BIN),
+    url: UI_URL || localUrl(),
+    localUrl: localUrl(),
+    phoneUrl: phoneUrl(),
+    doctor,
+    projects: projects().map((project) => project.name),
+  };
+}
+function menubarView() {
+  const builds = allBuilds();
+  const current = builds.find((item) => ['running', 'cancelling'].includes(item.status));
+  const last = builds.find((item) => !ACTIVE.includes(item.status));
+  return {
+    url: localUrl(),
+    phoneUrl: phoneUrl() || UI_URL || localUrl(),
+    loginAtLogin: existsSync(UI_PLIST) ? plistLogin(UI_PLIST) : config().loginAtLogin !== false,
+    current: slimBuild(current),
+    last: slimBuild(last),
+    queued: builds.filter((item) => item.status === 'queued').length,
+    projects: projects().map((project) => project.name),
+    doctorMiss: doctorCache.data?.items?.filter((item) => item.status === 'miss').length ?? 0,
+  };
+}
+async function applySetup(req, res) {
+  const { setupComplete, loginAtLogin, menubar } = await body(req);
+  const changes = {};
+  if (setupComplete !== undefined) changes.setupComplete = Boolean(setupComplete) || undefined;
+  if (loginAtLogin !== undefined) {
+    const on = Boolean(loginAtLogin);
+    changes.loginAtLogin = on || undefined;
+    setPlistLogin(UI_PLIST, on);
+    setPlistLogin(BAR_PLIST, on);
+  }
+  if (menubar !== undefined) {
+    const on = Boolean(menubar);
+    changes.menubar = on || undefined;
+    if (on) {
+      try {
+        await run(join(ROOT, 'install-ui.sh'), ['--menubar-only'], { timeout: 120000 });
+      } catch (error) {
+        const detail = (error.stderr?.toString() || error.message).split('\n').find((line) => line.trim()) || 'Couldn’t start the menu bar';
+        return json(res, 400, { error: detail });
+      }
+    } else {
+      await run('launchctl', ['bootout', `gui/${uid}/local.macbuild.menubar`], { timeout: 5000 }).catch(() => {});
+      setPlistLogin(BAR_PLIST, false);
+    }
+  }
+  saveConfig(changes);
+  return json(res, 200, await setupView());
+}
 async function system() {
   const disk = statfsSync(homedir());
   const battery = await run('pmset', ['-g', 'batt']).then(({ stdout }) => stdout.match(/(\d+)%;\s*([a-zA-Z ]+)/)).catch(() => null);
@@ -790,6 +883,14 @@ async function api(req, res, url) {
   // a custom header cannot be sent cross-site without a preflight this server never approves
   if (req.method !== 'GET' && req.headers['x-macbuild'] !== '1') return json(res, 403, { error: 'forbidden' });
   if (url.pathname === '/api/system' && req.method === 'GET') return json(res, 200, await system());
+  if (url.pathname === '/api/setup' && req.method === 'GET') return json(res, 200, await setupView());
+  if (url.pathname === '/api/setup' && req.method === 'POST') return applySetup(req, res);
+  if (url.pathname === '/api/menubar' && req.method === 'GET') return json(res, 200, menubarView());
+  if (url.pathname === '/api/projects/scan' && req.method === 'POST') {
+    await run(BIN, ['scan'], { timeout: 60000 }).catch(() => {});
+    const listed = allBuilds();
+    return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: listed.find((build) => build.project === project.name) ?? null })));
+  }
   if (url.pathname === '/api/disk' && req.method === 'GET') return json(res, 200, await disk(url.searchParams.has('fresh')));
   if (url.pathname === '/api/disk/clean' && req.method === 'POST') {
     const { status, error } = await cleanDisk((await body(req)).key);

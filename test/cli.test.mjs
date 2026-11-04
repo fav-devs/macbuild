@@ -14,6 +14,7 @@ const EAS_JSON = JSON.stringify({ build: { development: { developmentClient: tru
 const MACBUILD = join(ROOT, 'bin/macbuild');
 // Asks one signing question the way eas does, colours included, then writes the IPA where --output says.
 const FAKE_EAS = `#!/bin/bash
+case "$1" in --version) echo "eas-cli/16.0.0"; exit 0;; whoami) echo "tester"; exit 0;; esac
 echo "$* cwd=$(pwd) env=$([ -f .env ] && echo yes || echo no) APP_VARIANT=\${APP_VARIANT:-} EAS_BUILD_PROFILE=\${EAS_BUILD_PROFILE:-}" >> "$HOME/eas-calls"
 out=""; while [ $# -gt 0 ]; do [ "$1" = --output ] && out=$2; shift; done
 printf '\\033[32m?\\033[39m \\033[1mReuse this distribution certificate?\\033[22m (Y/n) '
@@ -228,6 +229,33 @@ test('builds, log and show read dashboard history', () => {
   const dumped = JSON.parse(run(['builds', '--json']).stdout);
   assert.equal(dumped[0].id, '20260102020202-other');
   assert.equal(dumped.length, 2);
+});
+
+test('doctor --json lists checks', () => {
+  const { app, run } = sandbox();
+  run(['add', 'myapp', app]);
+  const result = run(['doctor', '--json']);
+  const data = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  assert.equal(typeof data.ok, 'boolean');
+  assert.equal(data.ok, !data.items.some((item) => item.status === 'miss'));
+  assert.ok(data.items.some((item) => item.id === 'node' && item.status === 'ok'));
+  assert.ok(data.items.some((item) => item.id === 'projects' && item.status === 'ok'));
+  assert.ok(data.items.some((item) => item.id === 'eas-cli' && item.status === 'ok'));
+});
+
+test('setup prints status and can turn login on', () => {
+  const { home, run } = sandbox();
+  mkdirSync(join(home, 'Library/LaunchAgents'), { recursive: true });
+  const plist = join(home, 'Library/LaunchAgents/local.macbuild.ui.plist');
+  writeFileSync(plist, '<?xml version="1.0"?>\n<plist><dict><key>RunAtLoad</key><false/></dict></plist>\n');
+  const status = run(['setup']);
+  assert.equal(status.status, 0, status.stdout + status.stderr);
+  assert.match(status.stdout, /login\s+off/);
+  assert.match(status.stdout, /dashboard/);
+  const on = run(['setup', '--login']);
+  assert.equal(on.status, 0, on.stdout + on.stderr);
+  assert.match(readFileSync(plist, 'utf8'), /<true\/>/);
+  assert.match(run(['setup']).stdout, /login\s+on/);
 });
 
 test('a profile’s env is set before eas so app.config sees APP_VARIANT', () => {

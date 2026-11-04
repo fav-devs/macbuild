@@ -26,7 +26,16 @@ curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh |
 
 The installer finds Expo apps in your usual project folders, then runs `macbuild doctor` to show anything missing. Run the same command again to update.
 
-You need a Mac with Xcode, Node.js, CocoaPods, fastlane, `eas-cli` (signed in with `eas login`) and an Apple Developer account. For Android, add Android Studio (for its SDK) and Java 17. GitHub CLI and Tailscale are optional.
+With `--ui`, the dashboard starts at login and a hammer sits in the menu bar. Walk through the rest in the setup guide:
+
+```sh
+macbuild setup            # what's missing, the dashboard URL, login and menu bar
+macbuild setup --ui       # dashboard + menu bar
+macbuild setup --login    # open at login
+macbuild setup --open     # open the guide in the browser
+```
+
+Or open `#/setup` on the dashboard. You need a Mac with Xcode, Node.js, CocoaPods, fastlane, `eas-cli` (signed in with `eas login`) and an Apple Developer account. For Android, add Android Studio (for its SDK) and Java 17. GitHub CLI and Tailscale are optional.
 
 ### Using an AI agent
 
@@ -70,6 +79,7 @@ macbuild list                                # your projects
 macbuild add myapp ~/code/myapp/apps/mobile  # the folder with eas.json; in a monorepo, the app's folder
 macbuild scan                                # find Expo apps in ~/Documents, ~/Developer, ~/Projects, ~/code and ~/src
 macbuild doctor                              # check the tools and logins builds need
+macbuild setup                               # dashboard, login, menu bar, and the same checks
 ```
 
 Project names use letters, digits, `.`, `_` and `-`.
@@ -91,7 +101,7 @@ Optional, in `~/.config/macbuild/env`. The file stays on your Mac; never commit 
 
 ## Web UI
 
-Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on the Mac. With Tailscale it's also published on your tailnet only, at `https://<your-mac>.<tailnet>.ts.net:8443`. Open that in Safari on your iPhone and add it to your Home Screen.
+Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on the Mac, with a menu bar extra for build status and a one-click build. Turn those off under Settings, or with `macbuild setup --nologin` and `--no-menubar`. With Tailscale the dashboard is also published on your tailnet only, at `https://<your-mac>.<tailnet>.ts.net:8443`. Open that in Safari on your iPhone and add it to your Home Screen. The setup guide at `#/setup` copies that URL.
 
 - Start iOS, Simulator and Android builds from any branch, commit and `eas.json` profile, and reuse the last one when native code hasn't changed
 - Follow a build live: its current phase, the time left going by your usual build time, and logs grouped by phase on a timeline
@@ -142,6 +152,8 @@ Signing credentials stay with EAS and your Mac. Your Apple password, if you set 
 | `~/.cache/macbuild` | Work folders and checkouts. Safe to delete between builds. |
 | `~/Library/Logs/<name>-<platform>-build-<profile>.log` | The log of the last terminal build of each app, platform and profile |
 | `~/Library/Logs/macbuild-ui.log` | The web UI's own log |
+| `~/Library/Logs/macbuild-menubar.log` | The menu bar extra |
+| `~/.local/bin/macbuild-menubar` | Menu bar binary, compiled on this Mac |
 
 ## Uninstall
 

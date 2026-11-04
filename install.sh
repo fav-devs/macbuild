@@ -2,7 +2,7 @@
 # macbuild installer. Safe to run again.
 #   curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh | bash
 #   ... | bash -s -- --ui --guard
-#   --ui         run the web UI at login, and publish it on your tailnet if Tailscale is installed
+#   --ui         run the web UI at login, a menu bar extra, and publish it on your tailnet if Tailscale is installed
 #   --guard      refuse EAS cloud builds on this Mac (wraps the global eas command)
 #   --unguard    remove that wrapper
 #   --uninstall  remove macbuild, the wrapper, the web UI service and the build cache (keeps settings and build history)
@@ -24,7 +24,8 @@ if [ "$UNINSTALL" = 1 ]; then
   # The tailnet port install-ui.sh published, read back before the plist goes.
   HTTPS=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:MACBUILD_UI_HTTPS_PORT' "$PLIST" 2>/dev/null || echo "${MACBUILD_UI_HTTPS_PORT:-8443}")
   launchctl bootout "gui/$(id -u)/local.macbuild.ui" 2>/dev/null || true
-  rm -f "$PLIST" "$HOME/.local/bin/macbuild"
+  launchctl bootout "gui/$(id -u)/local.macbuild.menubar" 2>/dev/null || true
+  rm -f "$PLIST" "$HOME/Library/LaunchAgents/local.macbuild.menubar.plist" "$HOME/.local/bin/macbuild" "$HOME/.local/bin/macbuild-menubar"
   TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale; [ -x "$TS" ] || TS=$(command -v tailscale || true)
   [ -n "$TS" ] && "$TS" serve --https="$HTTPS" off 2>/dev/null || true
   # Work directories, checkouts and temporary IPAs: often the largest thing macbuild leaves.

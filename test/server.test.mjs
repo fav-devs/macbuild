@@ -105,6 +105,10 @@ esac
 `, { mode: 0o755 });
   // Fake macbuild: fail.app fails with a known error, skip.app reuses its first build, slow.app takes three seconds.
   writeFileSync(join(bin, 'macbuild'), `#!/bin/bash
+case "$1" in
+  doctor) echo '{"ok":true,"items":[{"id":"macos","label":"macOS","status":"ok","detail":"15.0"},{"id":"projects","label":"projects","status":"ok","detail":"6 listed"}]}'; exit 0;;
+  scan) exit 0;;
+esac
 project=$1; out=""; prev=""; for a in "$@"; do [ "$prev" = --output ] && out=$a; prev=$a; done
 echo "[START_BUILD] fake build $*" >> "$MACBUILD_LOG"
 case "$project" in
@@ -292,6 +296,24 @@ test('a newer push replaces a build of the same branch that has not started', as
   const replaced = await until(async () => (await builds()).find((item) => item.project === 'slow.app' && /Replaced by a newer commit/.test(item.reason ?? '')));
   assert.equal(replaced.status, 'cancelled');
   await until(async () => (await builds()).find((item) => item.project === 'slow.app' && item.commit?.hash === fourth));
+});
+
+test('setup reports doctor and toggles open-at-login without a UI restart', async () => {
+  const setup = await request('/api/setup');
+  assert.equal(setup.status, 200);
+  assert.equal(setup.json.doctor.ok, true);
+  assert.ok(setup.json.projects.includes('my_app'));
+  const agents = join(home, 'Library/LaunchAgents');
+  mkdirSync(agents, { recursive: true });
+  writeFileSync(join(agents, 'local.macbuild.ui.plist'), '<?xml version="1.0"?>\n<plist><dict><key>RunAtLoad</key><false/></dict></plist>\n');
+  const saved = await request('/api/setup', { method: 'POST', body: { loginAtLogin: true, setupComplete: true } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.setupComplete, true);
+  assert.match(readFileSync(join(agents, 'local.macbuild.ui.plist'), 'utf8'), /<true\/>/);
+  const bar = await request('/api/menubar');
+  assert.equal(bar.status, 200);
+  assert.ok(bar.json.projects.includes('my_app'));
+  assert.equal(bar.json.loginAtLogin, true);
 });
 
 test('a rule for a removed project can be removed', async () => {

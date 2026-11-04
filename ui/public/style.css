@@ -458,3 +458,9 @@ a.pcard:hover { border-color: var(--line-2); box-shadow: var(--pop); }
 .meters { display: grid; gap: 14px; padding: 16px; border-top: 1px solid var(--line); }
 .banner { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; padding: 11px 14px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); font-size: 13px; color: var(--text-2); }
 .banner .i { color: var(--text); }
+
+/* setup guide */
+.setup { display: grid; gap: 16px; max-width: 640px; }
+.setup .seg { justify-self: start; }
+.setup-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.setup-foot .hint { margin: 0; }

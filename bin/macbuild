@@ -11,13 +11,15 @@
 #   --fast             fixed work directory + Xcode compilation caching, so later builds reuse compiled output
 #   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
 #   --output PATH      where the build goes (default: your Desktop)
-# Other commands: macbuild list | add <name> <path> | scan | doctor | builds | log | show
+# Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 # Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
 START=$SECONDS
 HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../lib" ] || HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
+# LaunchAgents for the dashboard and menu bar (UI_PLIST, BAR_PLIST, set_login).
+. "$ROOT/lib/agents.sh"
 CONFIG="$HOME/.config/macbuild"; PROJECTS="${MACBUILD_PROJECTS:-$CONFIG/projects.conf}"
 [ -f "$CONFIG/env" ] && . "$CONFIG/env"
 export MACBUILD_APPLE_ID MACBUILD_APPLE_PASSWORD_FILE
@@ -67,10 +69,16 @@ scan_projects() {
   done
 }
 doctor() {
-  local bad=0 names
-  ok() { printf '  ok    %-12s %s\n' "$1" "$2"; }
-  no() { printf '  MISS  %-12s %s\n' "$1" "$2"; bad=1; }
-  opt() { printf '  skip  %-12s %s\n' "$1" "$2"; }
+  local bad=0 names json=0 items
+  [ "${1:-}" = --json ] && json=1
+  items=$(mktemp "${TMPDIR:-/tmp}/macbuild-doctor.XXXXXX") || return 1
+  rec() {
+    python3 -c 'import json,sys; json.dump({"id":sys.argv[1],"label":sys.argv[2],"status":sys.argv[3],"detail":sys.argv[4]},sys.stdout); print()' "$1" "$2" "$3" "$4" >> "$items"
+  }
+  sid() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '-'; }
+  ok() { rec "$(sid "$1")" "$1" ok "$2"; [ "$json" = 1 ] || printf '  ok    %-12s %s\n' "$1" "$2"; }
+  no() { rec "$(sid "$1")" "$1" miss "$2"; bad=1; [ "$json" = 1 ] || printf '  MISS  %-12s %s\n' "$1" "$2"; }
+  opt() { rec "$(sid "$1")" "$1" skip "$2"; [ "$json" = 1 ] || printf '  skip  %-12s %s\n' "$1" "$2"; }
   [ "$(uname)" = Darwin ] && ok macOS "$(sw_vers -productVersion)" || no macOS "iOS builds need a Mac"
   xcodebuild -version >/dev/null 2>&1 && ok Xcode "$(xcodebuild -version | head -1)" || no Xcode "install from the App Store, then run: sudo xcode-select -s /Applications/Xcode.app"
   command -v node >/dev/null && ok node "$(node -v)" || no node "install Node.js 20 or newer"
@@ -89,7 +97,86 @@ doctor() {
   [ -s "$PROJECTS" ] && ok projects "$(grep -c '|' "$PROJECTS") listed" || no projects "run: macbuild scan, or macbuild add <name> <path>"
   names=$(grep -v '^#' "$PROJECTS" 2>/dev/null | grep '|' | cut -d'|' -f1 | while read -r name; do valid_name "$name" || printf '"%s" ' "$name"; done)
   [ -z "$names" ] || no names "rename ${names}in $PROJECTS: letters, digits, '.', '_' and '-' only"
+  if [ "$json" = 1 ]; then
+    python3 -c '
+import json, sys
+items = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+json.dump({"ok": all(item["status"] != "miss" for item in items), "items": items}, sys.stdout)
+print()
+' "$items"
+  fi
+  rm -f "$items"
   return $bad
+}
+dashboard_url() {
+  if [ -n "${MACBUILD_UI_URL:-}" ]; then printf '%s\n' "$MACBUILD_UI_URL"; return; fi
+  python3 -c '
+import os, re, sys
+plist = os.path.join(os.environ["HOME"], "Library/LaunchAgents/local.macbuild.ui.plist")
+try: text = open(plist).read()
+except OSError: sys.exit(0)
+m = re.search(r"<key>MACBUILD_UI_URL</key>\s*<string>([^<]*)</string>", text)
+print(m.group(1) if m and m.group(1) else "http://127.0.0.1:4180")
+'
+}
+setup_cmd() {
+  local do_ui=0 do_login="" do_bar="" do_open=0
+  for arg in "$@"; do
+    case "$arg" in
+      --ui) do_ui=1;;
+      --login) do_login=1;;
+      --nologin|--no-login) do_login=0;;
+      --menubar) do_bar=1;;
+      --no-menubar) do_bar=0;;
+      --open) do_open=1;;
+      --json) doctor --json; return $?;;
+      -h|--help) printf '%s\n' "macbuild setup [--ui] [--login|--nologin] [--menubar|--no-menubar] [--open]"; return 0;;
+      *) echo "unknown option $arg"; return 2;;
+    esac
+  done
+  if [ "$do_ui" = 1 ]; then
+    [ -f "$ROOT/install-ui.sh" ] || { echo "install-ui.sh missing"; return 1; }
+    "$ROOT/install-ui.sh" || return 1
+  fi
+  if [ -n "$do_login" ]; then
+    if [ ! -f "$UI_PLIST" ]; then echo "install the dashboard first: macbuild setup --ui"; return 1; fi
+    set_login "$do_login"
+    echo "login $( [ "$do_login" = 1 ] && echo on || echo off )"
+  fi
+  if [ "$do_bar" = 1 ]; then
+    [ "$(uname)" = Darwin ] || { echo "menu bar needs macOS"; return 1; }
+    if [ ! -x "$BAR_BIN" ] || [ ! -f "$BAR_PLIST" ]; then
+      [ -f "$ROOT/install-ui.sh" ] || { echo "install-ui.sh missing"; return 1; }
+      "$ROOT/install-ui.sh" --menubar-only || return 1
+    else
+      set_plist_login "$BAR_PLIST" true || true
+      save_login_pref "$(saved_login)" true
+      bootout_agent "$BAR_LABEL"
+      bootstrap_agent "$BAR_PLIST"
+    fi
+    echo "menu bar on"
+  fi
+  if [ "$do_bar" = 0 ]; then
+    save_login_pref "$(saved_login)" false
+    [ -f "$BAR_PLIST" ] && set_plist_login "$BAR_PLIST" false || true
+    bootout_agent "$BAR_LABEL"
+    echo "menu bar off"
+  fi
+  if [ "$do_open" = 1 ]; then
+    url=$(dashboard_url)
+    [ -n "$url" ] || url="http://127.0.0.1:4180"
+    open "$url/#/setup" 2>/dev/null || echo "$url/#/setup"
+    return 0
+  fi
+  url=$(dashboard_url)
+  printf 'macbuild setup\n\n'
+  printf '  dashboard  %s\n' "${url:-off  (macbuild setup --ui)}"
+  printf '  login      %s\n' "$( [ -f "$UI_PLIST" ] && plist_login "$UI_PLIST" && echo on || echo off )"
+  printf '  menu bar   %s\n' "$( agent_loaded "$BAR_LABEL" && echo on || { [ -x "$BAR_BIN" ] && echo installed; } || echo off )"
+  echo
+  doctor
+  echo
+  echo "Guide: ${url:-http://127.0.0.1:4180}/#/setup"
 }
 # History the web UI writes: meta.json + build.log per job. Agents read this instead of scraping the dashboard.
 history() {
@@ -173,7 +260,8 @@ case "${1:-}" in
   list) cat "$PROJECTS" 2>/dev/null; exit 0;;
   add) add_project "${2:?usage: macbuild add <name> <path>}" "${3:?usage: macbuild add <name> <path>}"; exit $?;;
   scan) scan_projects; exit 0;;
-  doctor) doctor; exit $?;;
+  doctor) doctor "${2:-}"; exit $?;;
+  setup) shift; setup_cmd "$@"; exit $?;;
   builds) history builds "${2:-}" "${3:-}"; exit $?;;
   log) history log "${2:-}" "${3:-}"; exit $?;;
   show) history show "${2:-}" "${3:-}"; exit $?;;

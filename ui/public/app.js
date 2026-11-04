@@ -189,11 +189,11 @@ function parseRoute() {
     const section = ALIASES[match[2]] ?? match[2] ?? 'overview';
     return { page: 'project', name: match[1], section: SECTIONS[section] ? section : 'overview' };
   }
-  return { page: { '#/projects': 'projects', '#/new': 'pick', '#/insights': 'insights', '#/settings': 'settings' }[hash] ?? 'builds' };
+  return { page: { '#/projects': 'projects', '#/new': 'pick', '#/insights': 'insights', '#/settings': 'settings', '#/setup': 'setup' }[hash] ?? 'builds' };
 }
 function renderShell(where) {
   const on = (test) => (test ? ' class="on" aria-current="page"' : '');
-  const top = ['builds', 'build'].includes(where.page) ? 'builds' : ['projects', 'pick', 'project', 'new'].includes(where.page) ? 'projects' : where.page;
+  const top = ['builds', 'build'].includes(where.page) ? 'builds' : ['projects', 'pick', 'project', 'new'].includes(where.page) ? 'projects' : where.page === 'setup' ? 'settings' : where.page;
   const projectName = ['project', 'new'].includes(where.page) ? where.name : null;
   side.innerHTML = `
     <a class="brand" href="#/"><span class="mark">${icon('cube')}</span>macbuild<span class="tag">local</span></a>
@@ -360,7 +360,7 @@ async function buildsPage() {
   let { builds } = await get('/api/builds');
   app.innerHTML = `${mobileTop()}
     ${header('Builds', '', `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}
-    <div id="install"></div><div id="live"></div>
+    <div id="install"></div><div id="setup-banner"></div><div id="live"></div>
     <div class="toolbar"><label class="search">${icon('search')}<input id="q" type="search" placeholder="Search commits, branches, people" aria-label="Search builds" value="${esc(prefs.query)}"></label>
       <div class="seg" role="group" aria-label="Show">${Object.entries(FILTERS).map(([key, label]) => `<button data-filter="${key}" class="${prefs.filter === key ? 'on' : ''}" aria-pressed="${prefs.filter === key}">${key === 'testflight' && builds.some((build) => build.platform === 'android') ? 'Store uploads' : label}</button>`).join('')}</div></div>
     <div id="list"></div>`;
@@ -372,6 +372,7 @@ async function buildsPage() {
       : `<div class="card">${builds.length ? empty('search', 'No matching builds') : empty('layers', 'No builds yet', '', `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}</div>`;
   };
   draw();
+  get('/api/setup').then(setupBanner).catch(() => {});
   $('#q').oninput = (event) => { prefs.query = event.target.value; draw(); };
   app.onclick = (event) => {
     const button = event.target.closest('[data-filter]');
@@ -977,8 +978,81 @@ async function insightsPage() {
   };
 }
 
+function setupBanner(setup) {
+  const box = $('#setup-banner');
+  if (!box || setup.setupComplete) return;
+  const miss = (setup.doctor?.items ?? []).filter((item) => item.status === 'miss').length;
+  if (!miss) return;
+  box.innerHTML = `<div class="banner">${icon('mac')}<span>${plural(miss, 'setup item')} to fix</span><a class="btn sm" href="#/setup" style="margin-left:auto">Guide</a><button class="btn ghost sm" data-hide-setup aria-label="Dismiss">${icon('x')}</button></div>`;
+  box.querySelector('[data-hide-setup]').onclick = async () => { await post('/api/setup', { setupComplete: true }); box.innerHTML = ''; };
+}
+const SETUP_STEPS = [['tools', 'Tools'], ['apps', 'Apps'], ['mac', 'This Mac'], ['phone', 'Phone']];
+function doctorRows(items) {
+  return `<div class="rows">${(items ?? []).map((item) => `<div class="row compact">
+    <span class="st ${item.status === 'ok' ? 'success' : item.status === 'miss' ? 'failed' : ''}">${icon(item.status === 'ok' ? 'check' : item.status === 'miss' ? 'cross' : 'skip')}</span>
+    <span class="main"><span class="title">${esc(item.label)}</span><span class="meta wrap">${esc(item.detail)}</span></span>
+  </div>`).join('')}</div>`;
+}
+async function setupPage() {
+  const data = await get('/api/setup');
+  const miss = (data.doctor?.items ?? []).filter((item) => item.status === 'miss');
+  const step = prefs.setupStep ?? (miss.length ? 'tools' : data.projects.length ? 'mac' : 'apps');
+  const tools = data.doctor?.items ?? [];
+  const pane = {
+    tools: card('Tools', 'gear', tools.length ? doctorRows(tools) : empty('gear', 'Couldn’t read doctor', esc(data.doctor?.error ?? ''))),
+    apps: card('Apps', 'apps', data.projects.length
+      ? `<div class="rows">${data.projects.map((name) => `<a class="row" href="#/p/${esc(name)}">${avatar(name, 'sm')}<span class="main"><span class="title">${esc(name)}</span></span></a>`).join('')}</div>`
+      : empty('apps', 'No apps yet', 'Scan the usual project folders, or add one with macbuild add.'),
+    '<button class="btn sm" id="scan">Scan</button>'),
+    mac: card('This Mac', 'mac', `<div class="rows">
+      <label class="toggle"><span><b>Open at login</b></span><input class="switch" type="checkbox" id="login-at-login" ${data.loginAtLogin ? 'checked' : ''}></label>
+      <label class="toggle"><span><b>Menu bar</b></span><input class="switch" type="checkbox" id="menubar" ${data.menubar ? 'checked' : ''}></label>
+    </div>`),
+    phone: card('Phone', 'phone', `<div class="setting">
+      <div><b>This Mac</b><p class="hint mono" id="local-url">${esc(data.localUrl)}</p></div>
+      <div><b>On your tailnet</b><p class="hint mono" id="phone-url">${esc(data.phoneUrl || 'Tailscale not publishing HTTPS yet')}</p></div>
+      <div class="inline">${data.phoneUrl ? '<button class="btn sm" id="copy-phone">Copy phone URL</button>' : ''}<button class="btn sm ghost" id="copy-local">Copy local URL</button></div>
+    </div>`),
+  };
+  app.innerHTML = `${mobileTop()}${header('Setup', '', `<a class="btn ghost sm" href="#/settings">${icon('left')}Settings</a>`)}
+    <div class="setup">
+      <div class="seg" role="tablist">${SETUP_STEPS.map(([key, label]) => `<button data-step="${key}" class="${step === key ? 'on' : ''}" aria-selected="${step === key}">${label}</button>`).join('')}</div>
+      ${pane[step] ?? pane.tools}
+      <div class="setup-foot">
+        ${miss.length ? `<p class="hint">${plural(miss.length, 'item')} still missing</p>` : '<p class="hint ok">Ready to build</p>'}
+        <button class="btn primary" id="setup-done">${miss.length ? 'Done for now' : 'Done'}</button>
+      </div>
+    </div>`;
+  const save = async (changes) => {
+    const result = await post('/api/setup', changes);
+    if (result.error) { flash(result.error, true); return; }
+    route();
+  };
+  const login = $('#login-at-login');
+  if (login) login.onchange = () => save({ loginAtLogin: login.checked });
+  const bar = $('#menubar');
+  if (bar) bar.onchange = () => save({ menubar: bar.checked });
+  app.onclick = async (event) => {
+    const next = event.target.closest('[data-step]');
+    if (next) { prefs.setupStep = next.dataset.step; setupPage().catch(() => {}); return; }
+    if (event.target.closest('#scan')) {
+      event.target.closest('#scan').disabled = true;
+      await post('/api/projects/scan');
+      route();
+      return;
+    }
+    if (event.target.closest('#copy-phone') && data.phoneUrl) {
+      try { await navigator.clipboard.writeText(data.phoneUrl); flash('Copied'); } catch { flash(data.phoneUrl); }
+    }
+    if (event.target.closest('#copy-local')) {
+      try { await navigator.clipboard.writeText(data.localUrl); flash('Copied'); } catch { flash(data.localUrl); }
+    }
+    if (event.target.closest('#setup-done')) { await save({ setupComplete: true }); location.hash = '#/'; }
+  };
+}
+
 async function settingsPage() {
-  const data = await get('/api/system');
+  const [data, setup] = await Promise.all([get('/api/system'), get('/api/setup').catch(() => ({}))]);
   const canPush = 'PushManager' in window && 'serviceWorker' in navigator;
   const enabled = canPush ? Boolean(await Promise.race([pushState(), new Promise((resolve) => { setTimeout(() => resolve(null), 800); })])) : false;
   const { machine = {}, settings = {}, tools = {} } = data;
@@ -995,6 +1069,11 @@ async function settingsPage() {
       ${card('Disk', 'broom', `<div id="disk">${skeleton(5)}</div>`, '<button class="btn sm ghost" id="disk-again">Measure again</button>')}
       ${card('Notifications', 'bell', `<label class="toggle"><span><b>When a build finishes</b><small id="push-note">${canPush ? (enabled ? 'On' : '') : 'Add to Home Screen first'}</small></span><input class="switch" type="checkbox" id="push" ${enabled ? 'checked' : ''} ${canPush ? '' : 'disabled'}></label>
         ${enabled ? '<div class="card-foot"><button class="btn sm" id="push-test">Send a test</button></div>' : ''}`)}
+      ${card('On this Mac', 'mac', `<div class="rows">
+        <label class="toggle"><span><b>Open at login</b></span><input class="switch" type="checkbox" id="login-at-login" ${setup.loginAtLogin ? 'checked' : ''}></label>
+        <label class="toggle"><span><b>Menu bar</b></span><input class="switch" type="checkbox" id="menubar" ${setup.menubar ? 'checked' : ''}></label>
+        <a class="row compact" href="#/setup"><span class="main"><span class="title">Setup guide</span></span>${icon('right', 'sm')}</a>
+      </div>`)}
     </div><div class="stack">
       ${card('Integrations', 'link', `<div class="rows">
         <label class="toggle"><span><b>GitHub checks</b><small>${tools.gh ? '' : 'Run gh auth login'}</small></span><input class="switch" type="checkbox" id="gh-status" ${settings.githubStatus ? 'checked' : ''} ${tools.gh || settings.githubStatus ? '' : 'disabled'}></label>
@@ -1008,7 +1087,7 @@ async function settingsPage() {
           ${rule.missing ? `<button class="btn sm remove-rule" data-project="${esc(rule.project)}" data-on="${esc(rule.on ?? 'push')}" data-branch="${esc(rule.branch ?? '')}">Remove</button>` : `<a class="btn sm ghost" href="#/p/${esc(rule.project)}/automation">Manage</a>`}</div>`).join('')}</div>`
         : empty('bolt', 'None yet'))}
       ${card('Storage', 'disk', kv([['Builds kept', `${data.kept?.builds ?? '—'} <span class="faint">of ${data.kept?.maxBuilds ?? 200}</span>`], ['Build files kept', `${data.kept?.ipas ?? '—'} <span class="faint">of ${data.kept?.maxIpas ?? 10}</span>`], ['Space used', mb(data.ipaBytes)]], 'list-kv'))}
-      ${card('Tools', 'gear', kv([['Xcode', esc(tools.xcode || '—')], ['EAS CLI', esc(tools.eas || '—')], ['Node.js', esc(tools.node)], ['GitHub CLI', tools.gh ? 'Signed in' : '<span class="faint">Not signed in</span>'], ['Android SDK', tools.android ? 'Found' : '<span class="faint">Not installed</span>']], 'list-kv'))}
+      ${card('Tools', 'gear', setup.doctor?.items?.length ? doctorRows(setup.doctor.items) : kv([['Xcode', esc(tools.xcode || '—')], ['EAS CLI', esc(tools.eas || '—')], ['Node.js', esc(tools.node)], ['GitHub CLI', tools.gh ? 'Signed in' : '<span class="faint">Not signed in</span>'], ['Android SDK', tools.android ? 'Found' : '<span class="faint">Not installed</span>']], 'list-kv'))}
       ${card('About', 'cube', `<div class="card-body muted"><a class="link" href="https://github.com/fav-devs/macbuild">github.com/fav-devs/macbuild</a></div>`)}
     </div></div>`;
   const drawDisk = (disk) => {
@@ -1028,6 +1107,14 @@ async function settingsPage() {
     return true;
   };
   $('#gh-status').onchange = async (event) => { await saveSetting({ githubStatus: event.target.checked }, $('#hook-note')); };
+  const saveMac = async (changes, toggle) => {
+    const result = await post('/api/setup', changes);
+    if (result.error) { flash(result.error, true); if (toggle) toggle.checked = !toggle.checked; }
+  };
+  const login = $('#login-at-login');
+  if (login) login.onchange = () => saveMac({ loginAtLogin: login.checked }, login);
+  const bar = $('#menubar');
+  if (bar) bar.onchange = () => saveMac({ menubar: bar.checked }, bar);
   $('#hook-form').onsubmit = async (event) => { event.preventDefault(); if ($('#hook').value && await saveSetting({ webhook: $('#hook').value.trim() }, $('#hook-note'))) route(); };
   $('#team-form').onsubmit = async (event) => {
     event.preventDefault();
@@ -1097,7 +1184,7 @@ async function togglePush(on, note) {
 // Router
 const PAGES = {
   builds: buildsPage, build: (where) => buildPage(where.id), projects: projectsPage, pick: pickPage,
-  project: projectPage, new: newBuildPage, insights: insightsPage, settings: settingsPage,
+  project: projectPage, new: newBuildPage, insights: insightsPage, settings: settingsPage, setup: setupPage,
 };
 async function route() {
   routing.token += 1;
@@ -1148,6 +1235,6 @@ document.addEventListener('click', async (event) => {
   if (remove) { await post('/api/triggers', { project: remove.dataset.project, on: remove.dataset.on, branch: remove.dataset.branch, enabled: false }); route(); }
 });
 addEventListener('hashchange', () => { scrollTo(0, 0); route(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !['new', 'settings'].includes(parseRoute().page)) { loadShell(); route(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !['new', 'settings', 'setup'].includes(parseRoute().page)) { loadShell(); route(); } });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 loadShell().finally(route);
