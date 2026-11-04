@@ -4,13 +4,12 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib/agents.sh"
+. "$HERE/lib/tailscale.sh"
 MENUBAR_ONLY=0
 for arg in "$@"; do case "$arg" in --menubar-only) MENUBAR_ONLY=1;; --no-restart) ;; *) echo "unknown option $arg"; exit 2;; esac; done
-TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 PORT=${MACBUILD_UI_PORT:-4180}; HTTPS=${MACBUILD_UI_HTTPS_PORT:-8443}
-[ -x "$TS" ] || TS=$(command -v tailscale || true)
-HOST=""; [ -n "$TS" ] && HOST=$("$TS" status --json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
-URL=${HOST:+https://$HOST:$HTTPS}; URL=${URL:-http://localhost:$PORT}
+URL=$(ts_ensure) || true
+URL=${URL:-http://localhost:$PORT}
 NODE=$(command -v node)
 LOGIN=$(saved_login)
 PATH_ENV="$(dirname "$NODE"):$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -105,6 +104,5 @@ else
   bootstrap_agent "$UI_PLIST"
 fi
 install_menubar
-[ -n "$HOST" ] && "$TS" serve --bg --https="$HTTPS" "http://127.0.0.1:$PORT" >/dev/null
-[ -n "$HOST" ] || echo "Tailscale not running: the UI is on this Mac only, and installing on a phone needs HTTPS."
+case "$URL" in https://*) ;; *) echo "Tailscale not running: the UI is on this Mac only, and installing on a phone needs HTTPS.";; esac
 echo "$URL"

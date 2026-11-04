@@ -30,7 +30,8 @@ With `--ui`, the dashboard starts at login and a hammer sits in the menu bar. Wa
 
 ```sh
 macbuild setup            # what's missing, the dashboard URL, login and menu bar
-macbuild setup --ui       # dashboard + menu bar
+macbuild setup --ui       # dashboard + menu bar + Tailscale Serve
+macbuild setup --tailscale # start Tailscale and publish the dashboard on the tailnet
 macbuild setup --login    # open at login
 macbuild setup --open     # open the guide in the browser
 ```

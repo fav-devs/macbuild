@@ -21,6 +21,7 @@ const DATA = process.env.MACBUILD_DATA ?? join(homedir(), '.local/share/macbuild
 const PORT = Number(process.env.MACBUILD_UI_PORT ?? 4180);
 const BIN = process.env.MACBUILD_BIN ?? join(ROOT, 'bin/macbuild');
 const UI_URL = process.env.MACBUILD_UI_URL ?? '';
+const HTTPS_PORT = process.env.MACBUILD_UI_HTTPS_PORT ?? '8443';
 const KEEP_IPAS = 10;
 const KEEP_BUILDS = 200;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.css': 'text/css', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
@@ -376,7 +377,60 @@ const BAR_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.menubar.p
 const BAR_BIN = join(homedir(), '.local/share/macbuild/macbuild-menubar.app/Contents/MacOS/macbuild-menubar');
 const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
 const localUrl = () => `http://127.0.0.1:${PORT}`;
-const phoneUrl = () => (/^https:\/\//.test(UI_URL) ? UI_URL : '');
+function tsBin() {
+  if (process.env.MACBUILD_TAILSCALE === '') return '';
+  if (process.env.MACBUILD_TAILSCALE) return process.env.MACBUILD_TAILSCALE;
+  const app = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
+  return existsSync(app) ? app : '';
+}
+let tailnet = { at: 0, url: /^https:\/\//.test(UI_URL) ? UI_URL : '' };
+let openedTailscale = false;
+let ensuring = null;
+const phoneUrl = () => tailnet.url;
+async function refreshTailnet() {
+  const bin = tsBin();
+  if (!bin) return;
+  try {
+    const { stdout } = await run(bin, ['status', '--json'], { timeout: 5000 });
+    const dns = JSON.parse(stdout).Self?.DNSName?.replace(/\.$/, '');
+    if (dns) tailnet = { at: Date.now(), url: `https://${dns}:${HTTPS_PORT}` };
+  } catch {}
+}
+async function ensureServe() {
+  const bin = tsBin();
+  if (!bin) {
+    tailnet = { ...tailnet, at: Date.now() };
+    return;
+  }
+  try {
+    let running = false;
+    try {
+      const { stdout } = await run(bin, ['status', '--json'], { timeout: 5000 });
+      const st = JSON.parse(stdout);
+      running = st.BackendState === 'Running' && Boolean(st.Self?.Online);
+      const dns = st.Self?.DNSName?.replace(/\.$/, '');
+      if (dns) tailnet = { at: Date.now(), url: `https://${dns}:${HTTPS_PORT}` };
+    } catch {}
+    if (!running) {
+      if (!openedTailscale && process.platform === 'darwin' && !process.env.MACBUILD_TAILSCALE) {
+        openedTailscale = true;
+        spawn('open', ['-a', 'Tailscale'], { stdio: 'ignore' });
+      }
+      await run(bin, ['up', '--timeout', '20s'], { timeout: 25000 }).catch(() => {});
+    }
+    await run(bin, ['serve', '--bg', `--https=${HTTPS_PORT}`, `http://127.0.0.1:${PORT}`], { timeout: 10000 })
+      .catch((error) => console.error('tailscale serve', error.message.split('\n')[0]));
+    await refreshTailnet();
+  } finally {
+    tailnet = { at: Date.now(), url: tailnet.url };
+  }
+}
+async function keepTailscale() {
+  if (Date.now() - tailnet.at < 15000) return;
+  if (ensuring) return ensuring;
+  ensuring = ensureServe().finally(() => { ensuring = null; });
+  return ensuring;
+}
 function plistLogin(file) {
   try { return /<key>RunAtLoad<\/key>\s*<true\/>/.test(readFileSync(file, 'utf8')); } catch { return false; }
 }
@@ -405,6 +459,7 @@ async function doctorReport() {
 }
 const slimBuild = (build) => (build ? { id: build.id, project: build.project, profile: build.profile, status: build.status, subject: build.commit?.subject ?? '' } : null);
 async function setupView() {
+  await keepTailscale();
   const cfg = config();
   const doctor = await doctorReport();
   const barOn = await agentLoaded('local.macbuild.menubar');
@@ -413,7 +468,7 @@ async function setupView() {
     loginAtLogin: existsSync(UI_PLIST) ? plistLogin(UI_PLIST) : cfg.loginAtLogin !== false,
     menubar: barOn,
     menubarInstalled: existsSync(BAR_BIN),
-    url: UI_URL || localUrl(),
+    url: phoneUrl() || UI_URL || localUrl(),
     localUrl: localUrl(),
     phoneUrl: phoneUrl(),
     doctor,
@@ -989,7 +1044,10 @@ async function api(req, res, url) {
   if (url.pathname === '/api/system' && req.method === 'GET') return json(res, 200, await system());
   if (url.pathname === '/api/setup' && req.method === 'GET') return json(res, 200, await setupView());
   if (url.pathname === '/api/setup' && req.method === 'POST') return applySetup(req, res);
-  if (url.pathname === '/api/menubar' && req.method === 'GET') return json(res, 200, menubarView());
+  if (url.pathname === '/api/menubar' && req.method === 'GET') {
+    await keepTailscale();
+    return json(res, 200, menubarView());
+  }
   if (url.pathname === '/api/projects/scan' && req.method === 'POST') {
     await run(BIN, ['scan'], { timeout: 60000 }).catch(() => {});
     const listed = allBuilds();
@@ -1143,4 +1201,5 @@ createServer(async (req, res) => {
 }).listen(PORT, '127.0.0.1', () => {
   console.log(`macbuild UI on 127.0.0.1:${PORT}`);
   recoverInterrupted().catch((error) => console.error('recover', error.message)).finally(() => { prune(); next(); });
+  keepTailscale().catch((error) => console.error('tailscale', error.message));
 });

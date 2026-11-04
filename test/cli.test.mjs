@@ -36,6 +36,7 @@ function sandbox() {
   writeFileSync(join(app, 'eas.json'), EAS_JSON);
   const env = { ...process.env, HOME: home, TMPDIR: join(home, 'tmp'), PATH: `${join(home, 'bin')}:${process.env.PATH}` };
   for (const name of Object.keys(env)) if (name.startsWith('MACBUILD_')) delete env[name];
+  env.MACBUILD_TAILSCALE = '';
   const run = (args, extra = {}) => spawnSync(MACBUILD, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 60000 });
   const start = (args, extra = {}) => new Promise((resolve) => {
     const child = spawn(MACBUILD, args, { env: { ...env, ...extra } });
@@ -285,6 +286,40 @@ test('doctor --json lists checks', () => {
   assert.ok(data.items.some((item) => item.id === 'node' && item.status === 'ok'));
   assert.ok(data.items.some((item) => item.id === 'projects' && item.status === 'ok'));
   assert.ok(data.items.some((item) => item.id === 'eas-cli' && item.status === 'ok'));
+});
+
+test('doctor reports Tailscale serve, and setup --tailscale publishes it', () => {
+  const { home, app, run } = sandbox();
+  run(['add', 'myapp', app]);
+  const ts = join(home, 'bin/tailscale');
+  writeFileSync(ts, `#!/bin/bash
+echo "$*" >> "$HOME/ts-calls"
+case "$1 $2" in
+  "status --json")
+    if [ -f "$HOME/ts-up" ]; then echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"mac.example.ts.net."}}'
+    else echo '{"BackendState":"Stopped","Self":{}}'; fi;;
+  status) [ -f "$HOME/ts-up" ] || { echo "Tailscale is stopped."; exit 1; };;
+  "serve status")
+    if [ -f "$HOME/ts-serve" ]; then echo "https://mac.example.ts.net:8443 (tailnet only)"; echo "|-- / proxy http://127.0.0.1:4180"
+    else echo "No serve config"; fi;;
+  "serve --bg") touch "$HOME/ts-serve"; echo "Serve started";;
+esac
+[ "$1" = up ] && touch "$HOME/ts-up"
+exit 0
+`, { mode: 0o755 });
+  const env = { MACBUILD_TAILSCALE: ts };
+  const stopped = run(['doctor', '--json'], env);
+  const down = JSON.parse(stopped.stdout.trim().split('\n').at(-1));
+  const tsItem = down.items.find((item) => item.id === 'tailscale');
+  assert.equal(tsItem.status, 'miss');
+  assert.match(tsItem.detail, /stopped/);
+  const started = run(['setup', '--tailscale'], env);
+  assert.equal(started.status, 0, started.stdout + started.stderr);
+  assert.match(started.stdout, /https:\/\/mac\.example\.ts\.net:8443/);
+  assert.match(readFileSync(join(home, 'ts-calls'), 'utf8'), /^up /m);
+  assert.match(readFileSync(join(home, 'ts-calls'), 'utf8'), /serve --bg --https=8443/);
+  const ok = JSON.parse(run(['doctor', '--json'], env).stdout.trim().split('\n').at(-1));
+  assert.equal(ok.items.find((item) => item.id === 'tailscale').status, 'ok');
 });
 
 test('setup prints status and can turn login on', () => {

@@ -20,6 +20,7 @@ HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../l
 ROOT=$(cd "$HERE/.." && pwd)
 # LaunchAgents for the dashboard and menu bar (UI_PLIST, BAR_PLIST, set_login).
 . "$ROOT/lib/agents.sh"
+. "$ROOT/lib/tailscale.sh"
 CONFIG="$HOME/.config/macbuild"; PROJECTS="${MACBUILD_PROJECTS:-$CONFIG/projects.conf}"
 [ -f "$CONFIG/env" ] && . "$CONFIG/env"
 export MACBUILD_APPLE_ID MACBUILD_APPLE_PASSWORD_FILE
@@ -69,7 +70,7 @@ scan_projects() {
   done
 }
 doctor() {
-  local bad=0 names json=0 items
+  local bad=0 names json=0 items ts
   [ "${1:-}" = --json ] && json=1
   items=$(mktemp "${TMPDIR:-/tmp}/macbuild-doctor.XXXXXX") || return 1
   rec() {
@@ -92,7 +93,11 @@ doctor() {
   command -v gh >/dev/null && gh auth status >/dev/null 2>&1 && ok "GitHub CLI" "signed in" || opt "GitHub CLI" "optional: PR and CI details in the web UI"
   if [ -x "$HOME/.t3/bin/t3" ] || command -v t3 >/dev/null; then ok "T3 CLI" "split and push local git changes"
   else opt "T3 CLI" "optional: dashboard can split, commit and push local git changes"; fi
-  [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] || command -v tailscale >/dev/null && ok Tailscale "installed" || opt Tailscale "optional: needed to use the web UI from a phone"
+  ts=$(ts_bin)
+  if [ -z "$ts" ]; then opt Tailscale "optional: needed to use the web UI from a phone"
+  elif ts_online && ts_serve_ok; then ok Tailscale "$(ts_url)"
+  elif ts_online; then no Tailscale "running, dashboard not on the tailnet; run: macbuild setup --tailscale"
+  else no Tailscale "stopped; run: macbuild setup --tailscale"; fi
   android_env
   [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ] && ok "Android SDK" "$ANDROID_HOME" || opt "Android SDK" "for Android builds: install Android Studio"
   [ -n "${JAVA_HOME:-}" ] && ok "Java 17" "$JAVA_HOME" || opt "Java 17" "for Android builds: brew install --cask zulu@17"
@@ -122,7 +127,7 @@ print(m.group(1) if m and m.group(1) else "http://127.0.0.1:4180")
 '
 }
 setup_cmd() {
-  local do_ui=0 do_login="" do_bar="" do_open=0
+  local do_ui=0 do_login="" do_bar="" do_open=0 do_ts=0 net
   for arg in "$@"; do
     case "$arg" in
       --ui) do_ui=1;;
@@ -131,14 +136,17 @@ setup_cmd() {
       --menubar) do_bar=1;;
       --no-menubar) do_bar=0;;
       --open) do_open=1;;
+      --tailscale) do_ts=1;;
       --json) doctor --json; return $?;;
-      -h|--help) printf '%s\n' "macbuild setup [--ui] [--login|--nologin] [--menubar|--no-menubar] [--open]"; return 0;;
+      -h|--help) printf '%s\n' "macbuild setup [--ui] [--login|--nologin] [--menubar|--no-menubar] [--tailscale] [--open]"; return 0;;
       *) echo "unknown option $arg"; return 2;;
     esac
   done
   if [ "$do_ui" = 1 ]; then
     [ -f "$ROOT/install-ui.sh" ] || { echo "install-ui.sh missing"; return 1; }
     "$ROOT/install-ui.sh" || return 1
+  elif [ "$do_ts" = 1 ] || [ -f "$UI_PLIST" ]; then
+    net=$(ts_ensure) && echo "tailnet $net" || echo "tailnet off  (open Tailscale, then: macbuild setup --tailscale)"
   fi
   if [ -n "$do_login" ]; then
     if [ ! -f "$UI_PLIST" ]; then echo "install the dashboard first: macbuild setup --ui"; return 1; fi
@@ -166,6 +174,7 @@ setup_cmd() {
   url=$(dashboard_url)
   printf 'macbuild setup\n\n'
   printf '  dashboard  %s\n' "${url:-off  (macbuild setup --ui)}"
+  printf '  tailnet    %s\n' "$(ts_url 2>/dev/null || echo "off  (macbuild setup --tailscale)")"
   printf '  login      %s\n' "$( [ -f "$UI_PLIST" ] && plist_login "$UI_PLIST" && echo on || echo off )"
   printf '  menu bar   %s\n' "$( agent_loaded "$BAR_LABEL" && echo on || { [ -x "$BAR_BIN" ] && echo installed; } || echo off )"
   echo

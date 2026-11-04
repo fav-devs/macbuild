@@ -152,6 +152,7 @@ head -c 2048 /dev/zero > "$out"
     env: {
       ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, MACBUILD_UI_PORT: String(port), MACBUILD_UI_URL: `https://${TAILNET}`,
       MACBUILD_BIN: join(bin, 'macbuild'), MACBUILD_DATA: join(dir, 'builds'), MACBUILD_PROJECTS: join(dir, 'projects.conf'), MACBUILD_CONFIG: join(dir, 'ui.json'),
+      MACBUILD_TAILSCALE: '',
     },
   });
   globalThis.apps = apps;
@@ -406,4 +407,61 @@ test('a rule for a removed project can be removed', async () => {
   const removed = await request('/api/triggers', { method: 'POST', body: { project: 'gone', branch: 'main', enabled: false } });
   assert.equal(removed.status, 200);
   assert.equal(removed.json.triggers.some((rule) => rule.project === 'gone'), false);
+});
+
+test('the dashboard starts Tailscale and publishes Serve', async () => {
+  const tsPort = port + 1;
+  const tsHome = join(dir, 'ts-home');
+  const tsData = join(dir, 'ts-builds');
+  mkdirSync(join(tsHome, 'bin'), { recursive: true });
+  mkdirSync(tsData, { recursive: true });
+  const ts = join(tsHome, 'bin/tailscale');
+  writeFileSync(ts, `#!/bin/bash
+echo "$*" >> "${dir}/ts-calls"
+case "$1 $2" in
+  "status --json")
+    if [ -f "${dir}/ts-up" ]; then echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"mac.example.ts.net."}}'
+    else echo '{"BackendState":"Stopped","Self":{}}'; fi;;
+  "serve --bg") touch "${dir}/ts-serve"; echo "Serve started";;
+esac
+[ "$1" = up ] && touch "${dir}/ts-up"
+exit 0
+`, { mode: 0o755 });
+  const child = spawn(process.execPath, [join(ROOT, 'ui/server.mjs')], {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      HOME: tsHome,
+      PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+      MACBUILD_UI_PORT: String(tsPort),
+      MACBUILD_UI_URL: `http://127.0.0.1:${tsPort}`,
+      MACBUILD_BIN: join(dir, 'bin/macbuild'),
+      MACBUILD_DATA: tsData,
+      MACBUILD_PROJECTS: join(dir, 'projects.conf'),
+      MACBUILD_CONFIG: join(dir, 'ui.json'),
+      MACBUILD_TAILSCALE: ts,
+    },
+  });
+  const hit = (path) => new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: tsPort, path, headers: { host: `127.0.0.1:${tsPort}` } }, (res) => {
+      let text = '';
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => { let json = null; try { json = JSON.parse(text); } catch {} resolve({ status: res.statusCode, json }); });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  try {
+    await until(async () => (await hit('/api/builds').catch(() => null))?.status === 200);
+    const setup = await until(async () => {
+      const { json } = await hit('/api/setup');
+      return json?.phoneUrl?.startsWith('https://') && json;
+    });
+    assert.equal(setup.phoneUrl, 'https://mac.example.ts.net:8443');
+    const calls = readFileSync(join(dir, 'ts-calls'), 'utf8');
+    assert.match(calls, /^up /m);
+    assert.match(calls, /serve --bg --https=8443/);
+  } finally {
+    child.kill();
+  }
 });
