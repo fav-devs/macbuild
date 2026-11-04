@@ -78,6 +78,7 @@ Managing projects:
 macbuild list                                # your projects
 macbuild add myapp ~/code/myapp/apps/mobile  # the folder with eas.json; in a monorepo, the app's folder
 macbuild scan                                # find Expo apps in ~/Documents, ~/Developer, ~/Projects, ~/code and ~/src
+macbuild commit myapp --push                 # split local git changes with T3, then push
 macbuild doctor                              # check the tools and logins builds need
 macbuild setup                               # dashboard, login, menu bar, and the same checks
 ```
@@ -104,6 +105,7 @@ Optional, in `~/.config/macbuild/env`. The file stays on your Mac; never commit 
 Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on the Mac, with a menu bar extra for build status and a one-click build. Turn those off under Settings, or with `macbuild setup --nologin` and `--no-menubar`. With Tailscale the dashboard is also published on your tailnet only, at `https://<your-mac>.<tailnet>.ts.net:8443`. Open that in Safari on your iPhone and add it to your Home Screen. The setup guide at `#/setup` copies that URL.
 
 - Start iOS, Simulator and Android builds from any branch, commit and `eas.json` profile, and reuse the last one when native code hasn't changed
+- When the working copy has local git changes a GitHub build would skip, split them into commits and push through T3 Code so unrelated files stay apart
 - Follow a build live: its current phase, the time left going by your usual build time, and logs grouped by phase on a timeline
 - See commit, PR, GitHub checks, version, channel, app size and its change, signing expiry and who started it for each build
 - When a build fails, the likely cause and how to fix it

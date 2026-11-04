@@ -251,6 +251,33 @@ const more = (href, label) => `<a class="more" href="${href}">${label}${icon('ri
 const empty = (ic, title, note = '', action = '') => `<div class="empty">${icon(ic)}<strong>${title}</strong>${note ? `<p>${note}</p>` : ''}${action}</div>`;
 const skeleton = (rows = 3) => `<div class="sk-rows">${Array.from({ length: rows }, (_, index) => `<span class="sk" style="width:${[72, 54, 64, 46][index % 4]}%"></span>`).join('')}</div>`;
 const kv = (pairs, cls = 'kv') => `<dl class="${cls}">${pairs.filter(([, value]) => value !== undefined && value !== null && value !== '').map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl>`;
+const COMMIT_LIVE = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']);
+const commitLive = (data) => COMMIT_LIVE.has(data.commitJob?.status);
+function changesList(changes) {
+  if (!changes?.length) return '';
+  const shown = changes.slice(0, 12);
+  return `<ul class="changes">${shown.map((item) => `<li><span class="xy">${esc(item.code)}</span><span class="path">${esc(item.path)}</span></li>`).join('')}${changes.length > 12 ? `<li class="faint">and ${changes.length - 12} more</li>` : ''}</ul>`;
+}
+function commitOffer(data, { github = false } = {}) {
+  const dirty = data.changes?.length || data.dirty || 0;
+  const ahead = data.ahead || 0;
+  const live = commitLive(data);
+  if (!live && !dirty && !ahead) return '';
+  const note = live
+    ? `<p class="hint">T3 is splitting commits${data.commitJob?.link ? ` · <a class="link" href="${esc(data.commitJob.link)}" target="_blank" rel="noreferrer">Open</a>` : ''}</p>`
+    : dirty
+      ? `<p class="hint warn">${github ? `${plural(dirty, 'local file')} not on GitHub` : plural(dirty, 'uncommitted file')}</p>`
+      : `<p class="hint warn">${plural(ahead, 'unpushed commit')}</p>`;
+  const button = live ? '' : `<div class="inline commit-actions"><button type="button" class="btn sm" data-commit>${dirty ? 'Split, commit, and push' : 'Push to GitHub'}</button></div>`;
+  const error = data.commitJob?.error ? `<p class="hint bad">${esc(data.commitJob.error)}</p>` : '';
+  return `${note}${changesList(data.changes)}${button}${error}`;
+}
+async function runCommit(name, data) {
+  const result = await post(`/api/projects/${encodeURIComponent(name)}/commit`, { push: true });
+  data.commitJob = result;
+  if (result.error && !result.threadId) flash(result.error, true);
+  return result;
+}
 function buildRow(build, { project = true } = {}) {
   return `<a class="row build" href="#/build/${esc(build.id)}">
     ${statusIcon(build.status)}
@@ -647,13 +674,19 @@ const PROJECT_SECTIONS = {
           ${card('Health', 'chart', `<div class="card-body">${strip(data.builds)}<div class="strip-label"><span>Last ${Math.min(16, data.builds.length)}</span></div></div>
             <dl class="stats3" style="border-top:1px solid var(--line)"><div><dt>Passed</dt><dd>${data.stats.total ? `${Math.round((data.stats.passed / data.stats.total) * 100)}<small>%</small>` : '—'}</dd></div><div><dt>Typical</dt><dd>${data.stats.median ? `${Math.round(data.stats.median / 60000)}<small>min</small>` : '—'}</dd></div><div><dt>This week</dt><dd>${week}</dd></div></dl>`)}
           ${card('Signing', 'shield', kv([['Development profile', expiry(data.signing)], ['Devices', data.signing ? String(data.signing.devices) : '<span class="faint">—</span>'], ['App Store profile', expiry(data.storeSigning)]], 'list-kv'), more(`#/p/${esc(name)}/signing`, 'Details'))}
-          ${card('Working copy', 'mac', kv([['Branch', esc(data.branch || 'detached')], ['Commit', `<span class="mono">${esc(data.commit)}</span>`], ['Changes', data.dirty ? `<span class="warn">${plural(data.dirty, 'file')}</span>` : 'Clean'], ['GitHub', data.behind ? `<span class="warn">${data.behind} behind</span>` : 'Up to date']], 'list-kv'))}
+          ${card('Working copy', 'mac', `${kv([['Branch', esc(data.branch || 'detached')], ['Commit', `<span class="mono">${esc(data.commit)}</span>`], ['Changes', data.dirty ? `<span class="warn">${plural(data.dirty, 'file')}</span>` : 'Clean'], ['GitHub', data.behind ? `<span class="warn">${data.behind} behind</span>` : data.ahead ? `<span class="warn">${data.ahead} ahead</span>` : 'Up to date']], 'list-kv')}${data.dirty || data.ahead || commitLive(data) ? `<div class="card-body commit-box">${commitOffer(data)}</div>` : ''}`)}
           ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<a class="row compact" href="#/p/${esc(name)}/automation">${icon(rule.on === 'pr' ? 'pr' : rule.on === 'nightly' ? 'clock' : 'branch', 'sm faint')}<span class="main"><span class="title">${ruleTitle(rule)}</span><span class="meta">${ruleDetail(rule)}</span></span><span class="led ${rule.error ? '' : 'idle'}"></span></a>`).join('')}</div>`
             : '<div class="card-body muted">Off</div>', more(`#/p/${esc(name)}/automation`, 'Manage'))}
           ${card('Releases', 'send', `<div id="releases">${skeleton(3)}</div>`, more(`#/p/${esc(name)}/submissions`, 'Submissions'))}
         </div>
       </div>`;
     updateLive($('#plive'), data.builds);
+    app.onclick = async (event) => {
+      if (!event.target.closest('[data-commit]')) return;
+      await runCommit(name, data);
+      route();
+    };
+    if (commitLive(data)) every(2500, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(name)}`); if (!commitLive(fresh)) { route(); return 'stop'; } return undefined; });
     withExpo(name, $('#releases'), (expo) => {
       const last = expo.submissions[0];
       return kv([
@@ -821,10 +854,10 @@ async function newBuildPage({ name, branch }) {
     <aside class="stack"><section class="card" id="sum"></section></aside></div>`;
   const drawSource = () => {
     document.querySelectorAll('[data-source]').forEach((button) => button.classList.toggle('on', button.dataset.source === form.source));
-    $('#src').innerHTML = form.source === 'branch'
+    $('#src').innerHTML = `${form.source === 'branch'
       ? `<div class="form"><label class="field"><span>Branch</span><select class="select" id="branch">${data.branches.map((item) => `<option value="${esc(item.name)}" ${item.name === form.branch ? 'selected' : ''}>${esc(item.name)}${item.pr ? ` · #${esc(item.pr.number)}` : ''}</option>`).join('')}</select></label>
         <label class="field"><span>Commit</span><select class="select" id="commit">${commits.map((item, index) => `<option value="${index ? esc(item.hash) : ''}" ${(index ? item.hash : '') === form.commit ? 'selected' : ''}>${esc(item.short)} · ${esc(item.subject.slice(0, 60))}${index ? '' : ' (latest)'}</option>`).join('') || '<option>Loading…</option>'}</select></label></div>`
-      : data.dirty ? `<p class="hint warn">${plural(data.dirty, 'uncommitted change')}</p>` : '';
+      : ''}${commitOffer(data, { github: form.source === 'branch' })}`;
   };
   const drawProfiles = () => {
     document.querySelectorAll('[data-platform]').forEach((button) => button.classList.toggle('on', button.dataset.platform === form.platform));
@@ -870,6 +903,23 @@ async function newBuildPage({ name, branch }) {
     if (source) { form.source = source.dataset.source; form.commit = ''; loadCommits(); return; }
     const platform = event.target.closest('[data-platform]');
     if (platform) { form.platform = platform.dataset.platform; form.skip = null; drawProfiles(); drawSummary(); return; }
+    if (event.target.closest('[data-commit]')) {
+      const button = event.target.closest('[data-commit]');
+      button.disabled = true;
+      await runCommit(name, data);
+      drawSource(); drawSummary();
+      if (commitLive(data)) every(2500, async () => {
+        const fresh = await get(`/api/projects/${encodeURIComponent(name)}`);
+        data.dirty = fresh.dirty; data.changes = fresh.changes; data.ahead = fresh.ahead; data.commitJob = fresh.commitJob; data.t3 = fresh.t3;
+        drawSource(); drawSummary();
+        if (!commitLive(data)) {
+          if (form.source === 'branch' && !data.dirty) loadCommits();
+          return 'stop';
+        }
+        return undefined;
+      });
+      return;
+    }
     if (event.target.closest('#go')) {
       const go = $('#go'); go.disabled = true;
       const ref = form.source === 'branch' ? form.commit || form.branch : null;

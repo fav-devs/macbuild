@@ -11,6 +11,7 @@ import QRCode from 'qrcode';
 import webpush from 'web-push';
 import { diagnose } from '../lib/diagnose.mjs';
 import { readProfiles } from '../lib/profile.mjs';
+import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -274,13 +275,16 @@ async function projectDetail(project) {
   const done = builds.filter((build) => ['success', 'failed'].includes(build.status));
   const times = done.filter((build) => build.status === 'success' && build.startedAt).map((build) => build.finishedAt - build.startedAt).sort((a, b) => a - b);
   const current = await git(repo, 'branch', '--show-current');
-  const behind = current ? Number(await git(repo, 'rev-list', '--count', `HEAD..origin/${current}`)) || 0 : 0;
+  const copy = await inspectRepo(repo);
   const ios = builds.filter((build) => platformOf(build) === 'ios' && !build.simulator);
   return {
-    ...(await describe(project)), repo: repoSlug, refreshing, behind, branches, profiles: easProfiles(project.dir), builds: builds.slice(0, 60).map(withEstimate),
+    ...(await describe(project)), repo: repoSlug, refreshing, behind: copy.behind, ahead: copy.ahead,
+    changes: copy.changes, dirty: copy.dirty, t3: Boolean(t3Bin()), commitJob: await currentCommit(repo, project.name),
+    branches, profiles: easProfiles(project.dir), builds: builds.slice(0, 60).map(withEstimate),
     signing: ios.find((build) => build.signing)?.signing ?? null, storeSigning: ios.find((build) => build.signing && !build.installable)?.signing ?? null,
     stats: { total: done.length, passed: done.filter((build) => build.status === 'success').length, median: times[Math.floor(times.length / 2)] ?? 0 },
     triggers: config().triggers.filter((rule) => rule.project === project.name),
+    branch: copy.branch || current,
   };
 }
 async function checks(build) {
@@ -923,6 +927,16 @@ async function api(req, res, url) {
   if (url.pathname === '/api/projects' && req.method === 'GET') {
     const builds = allBuilds();
     return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: builds.find((build) => build.project === project.name) ?? null })));
+  }
+  if (parts[1] === 'projects' && parts[2] && parts[3] === 'commit') {
+    const project = projects().find((known) => known.name === parts[2]);
+    if (!project) return json(res, 404, { error: 'unknown project' });
+    if (req.method === 'POST') {
+      const { push } = await body(req);
+      const result = await startCommit({ dir: project.dir, name: project.name, push: push !== false, wait: false });
+      return json(res, result.error && !result.threadId ? 400 : 200, result);
+    }
+    if (req.method === 'GET') return json(res, 200, await currentCommit(project.dir, project.name));
   }
   if (parts[1] === 'projects' && parts[2] && req.method === 'GET') {
     const project = projects().find((known) => known.name === parts[2]);

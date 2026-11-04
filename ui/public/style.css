@@ -292,6 +292,13 @@ a.row:hover, button.row:hover { background: var(--hover); }
 .choice:has(input:checked)::after { box-shadow: inset 0 0 0 4.5px var(--accent); }
 .choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hint { margin-top: 8px; font-size: 12.5px; color: var(--text-2); }
+.changes { list-style: none; margin: 8px 0 0; padding: 0; }
+.changes li { display: grid; grid-template-columns: 2.4em minmax(0, 1fr); gap: 8px; padding: 2px 0; font: 12.5px/1.4 var(--mono); min-width: 0; }
+.changes .xy { color: var(--amber); font-weight: 650; white-space: pre; }
+.changes .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-actions { margin-top: 10px; }
+.commit-box { border-top: 1px solid var(--line); }
+.commit-box .hint { margin-top: 0; }
 .form { display: grid; gap: 22px; }
 .form .card-body { display: grid; gap: 18px; }
 

@@ -196,6 +196,9 @@ test('--ref builds a clean checkout of a monorepo app reached through a symlink'
   run(['add', 'mobile', join(home, 'linked/apps/mobile')]);
   const result = run(['mobile', '--ref', 'main', '--output', join(home, 'out.ipa')]);
   assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /local files not on GitHub/);
+  assert.match(result.stdout, /uncommitted\.txt/);
+  assert.match(result.stdout, /macbuild commit mobile --push/);
   assert.match(calls(), new RegExp(`cwd=${cache}/src/mobile/apps/mobile env=yes`));
   assert.equal(existsSync(join(cache, 'src/mobile')), false);
 });

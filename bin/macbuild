@@ -11,7 +11,7 @@
 #   --fast             fixed work directory + Xcode compilation caching, so later builds reuse compiled output
 #   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
 #   --output PATH      where the build goes (default: your Desktop)
-# Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show
+# Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show | commit <name> [--push]
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 # Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
@@ -90,6 +90,8 @@ doctor() {
     who=$(eas whoami 2>/dev/null | grep -vE 'eas-cli@|upgrade|npm install|outdated' | grep -m1 .); case "$who" in ""|*"Not logged in"*) no "Expo login" "run: eas login";; *) ok "Expo login" "$who";; esac
   else no eas-cli "npm install -g eas-cli"; fi
   command -v gh >/dev/null && gh auth status >/dev/null 2>&1 && ok "GitHub CLI" "signed in" || opt "GitHub CLI" "optional: PR and CI details in the web UI"
+  if [ -x "$HOME/.t3/bin/t3" ] || command -v t3 >/dev/null; then ok "T3 CLI" "split and push local git changes"
+  else opt "T3 CLI" "optional: dashboard can split, commit and push local git changes"; fi
   [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] || command -v tailscale >/dev/null && ok Tailscale "installed" || opt Tailscale "optional: needed to use the web UI from a phone"
   android_env
   [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ] && ok "Android SDK" "$ANDROID_HOME" || opt "Android SDK" "for Android builds: install Android Studio"
@@ -256,6 +258,34 @@ if not os.path.isfile(path):
 sys.stdout.write(open(path, "r", errors="replace").read())
 PY
 }
+commit_cmd() {
+  local name="${1:?usage: macbuild commit <name> [--push]}" dir push=0
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --push) push=1;;
+      *) echo "unknown option $1"; return 2;;
+    esac
+    shift
+  done
+  valid_name "$name" || { echo "bad name: $name"; return 1; }
+  dir=$(N="$name" awk -F'|' '$1==ENVIRON["N"]{print $2}' "$PROJECTS" 2>/dev/null)
+  [ -n "$dir" ] || { echo "unknown project: $name"; return 1; }
+  node "$ROOT/lib/commit.mjs" start "$dir" --name "$name" ${push:+--push} --wait
+}
+warn_dirty() {
+  # A --ref build uses origin. Local files never go in; offer T3 so related files stay in separate commits.
+  local repo porcelain n
+  [ -n "$REF" ] || return 0
+  repo=$(git -C "$APP_DIR" rev-parse --show-toplevel 2>/dev/null) || return 0
+  porcelain=$(git -C "$repo" status --porcelain 2>/dev/null) || return 0
+  [ -n "$porcelain" ] || return 0
+  echo "macbuild: local files not on GitHub (this --ref build skips them):"
+  echo "$porcelain" | head -n 12
+  n=$(printf '%s\n' "$porcelain" | grep -c .)
+  [ "$n" -gt 12 ] && echo "  … $((n - 12)) more"
+  echo "  split, commit and push: macbuild commit $NAME --push"
+}
 case "${1:-}" in
   list) cat "$PROJECTS" 2>/dev/null; exit 0;;
   add) add_project "${2:?usage: macbuild add <name> <path>}" "${3:?usage: macbuild add <name> <path>}"; exit $?;;
@@ -265,6 +295,7 @@ case "${1:-}" in
   builds) history builds "${2:-}" "${3:-}"; exit $?;;
   log) history log "${2:-}" "${3:-}"; exit $?;;
   show) history show "${2:-}" "${3:-}"; exit $?;;
+  commit) shift; commit_cmd "$@"; exit $?;;
 esac
 NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""
 while [ $# -gt 0 ]; do
@@ -495,6 +526,7 @@ install_simulator() {
   if [ -n "$SCREENSHOT" ]; then sleep 8; xcrun simctl io "$device" screenshot "$SCREENSHOT" >/dev/null && echo "screenshot: $SCREENSHOT"; fi
 }
 if [ -n "$REF" ]; then
+  warn_dirty
   checkout >> "$LOG" 2>&1 || { echo "checkout failed; log: $LOG"; tail -n 5 "$LOG"; exit 1; }
 fi
 cd "$APP_DIR" || exit 1

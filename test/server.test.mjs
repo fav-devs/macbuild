@@ -316,6 +316,33 @@ test('setup reports doctor and toggles open-at-login without a UI restart', asyn
   assert.equal(bar.json.loginAtLogin, true);
 });
 
+test('a dirty working copy lists files and starts a T3 commit thread', async () => {
+  const app = globalThis.apps.my_app;
+  writeFileSync(join(app, 'WIP'), 'local only\n');
+  const detail = await request('/api/projects/my_app');
+  assert.equal(detail.status, 200);
+  assert.ok(detail.json.dirty >= 1);
+  assert.equal(detail.json.changes.find((item) => item.path === 'WIP')?.label, 'untracked');
+  const missing = await request('/api/projects/my_app/commit', { method: 'POST', body: { push: true } });
+  assert.equal(missing.status, 400);
+  assert.match(missing.json.error, /T3 Code/);
+  const t3 = join(dir, 'bin/t3');
+  writeFileSync(t3, `#!/bin/bash
+echo "$*" >> "${dir}/t3-calls"
+if [ "$2" = start ]; then
+  cat > "${dir}/t3-prompt"
+  echo '{"threadId":"t-ui","title":"macbuild commit my_app","link":"http://127.0.0.1:3773/t-ui","status":"running"}'
+  exit 0
+fi
+echo '[]'
+`, { mode: 0o755 });
+  const started = await request('/api/projects/my_app/commit', { method: 'POST', body: { push: true } });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  assert.equal(started.json.threadId, 't-ui');
+  assert.match(readFileSync(join(dir, 't3-prompt'), 'utf8'), /WIP/);
+  assert.match(readFileSync(join(dir, 't3-prompt'), 'utf8'), /Do not dump unrelated work/);
+});
+
 test('a rule for a removed project can be removed', async () => {
   const { json } = await request('/api/system');
   assert.equal(json.triggers.find((rule) => rule.project === 'gone').missing, true);
