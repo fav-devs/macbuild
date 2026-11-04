@@ -511,7 +511,11 @@ case "$1 $2" in
   "status --json")
     if [ -f "${dir}/ts-up" ]; then echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"mac.example.ts.net."}}'
     else echo '{"BackendState":"Stopped","Self":{}}'; fi;;
-  "serve --bg") touch "${dir}/ts-serve"; echo "Serve started";;
+  "serve --bg")
+    if [ -f "${dir}/ts-serve-once" ]; then touch "${dir}/ts-serve"; echo "Serve started"; exit 0; fi
+    touch "${dir}/ts-serve-once"
+    echo "failed" >&2
+    exit 1;;
 esac
 [ "$1" = up ] && touch "${dir}/ts-up"
 exit 0
@@ -545,11 +549,13 @@ exit 0
     const setup = await until(async () => {
       const { json } = await hit('/api/setup');
       return json?.phoneUrl?.startsWith('https://') && json;
-    });
+    }, 20000);
     assert.equal(setup.phoneUrl, 'https://mac.example.ts.net:8443');
+    assert.ok(existsSync(join(dir, 'ts-serve')));
     const calls = readFileSync(join(dir, 'ts-calls'), 'utf8');
     assert.match(calls, /^up /m);
     assert.match(calls, /serve --bg --https=8443/);
+    assert.ok(calls.split('\n').filter((line) => line.includes('serve --bg')).length >= 2);
   } finally {
     child.kill();
   }

@@ -47,6 +47,8 @@ write_bar_plist() {
 <key>MACBUILD_UI_PORT</key><string>$PORT</string>
 </dict>
 <key>RunAtLoad</key><$LOGIN/>
+<key>LimitLoadToSessionType</key><string>Aqua</string>
+<key>ProcessType</key><string>Interactive</string>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>StandardOutPath</key><string>$HOME/Library/Logs/macbuild-menubar.log</string>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/macbuild-menubar.log</string>

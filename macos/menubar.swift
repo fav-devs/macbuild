@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import UserNotifications
 
@@ -15,7 +16,7 @@ struct Snapshot {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    var item: NSStatusItem!
     let menu = NSMenu()
     var snapshot = Snapshot()
     var timer: Timer?
@@ -34,7 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var canNotify: Bool { Bundle.main.bundleIdentifier != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A status item created before WindowServer stays invisible; KeepAlive restarts us in Aqua.
+        guard CGSessionCopyCurrentDictionary() != nil else { exit(1) }
         NSApp.setActivationPolicy(.accessory)
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard item.button != nil else { exit(1) }
         let button = item.button
         button?.image = NSImage(systemSymbolName: "hammer.fill", accessibilityDescription: "macbuild")
         button?.image?.isTemplate = true

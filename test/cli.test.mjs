@@ -322,6 +322,12 @@ exit 0
   assert.equal(ok.items.find((item) => item.id === 'tailscale').status, 'ok');
 });
 
+test('the menu bar LaunchAgent waits for Aqua', () => {
+  const text = readFileSync(join(ROOT, 'install-ui.sh'), 'utf8');
+  assert.match(text, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
+  assert.match(text, /<key>ProcessType<\/key><string>Interactive<\/string>/);
+});
+
 test('setup prints status and can turn login on', () => {
   const { home, run } = sandbox();
   mkdirSync(join(home, 'Library/LaunchAgents'), { recursive: true });

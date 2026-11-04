@@ -391,9 +391,12 @@ function tsBin() {
   const app = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
   return existsSync(app) ? app : '';
 }
-let tailnet = { at: 0, url: /^https:\/\//.test(UI_URL) ? UI_URL : '' };
+let tailnet = { at: 0, url: /^https:\/\//.test(UI_URL) ? UI_URL : '', ok: false };
 let openedTailscale = false;
 let ensuring = null;
+const SERVE_OK_MS = 15000;
+const SERVE_RETRY_MS = 5000;
+const SERVE_GIVE_UP_MS = 120000;
 const phoneUrl = () => tailnet.url;
 async function refreshTailnet() {
   const bin = tsBin();
@@ -401,15 +404,16 @@ async function refreshTailnet() {
   try {
     const { stdout } = await run(bin, ['status', '--json'], { timeout: 5000 });
     const dns = JSON.parse(stdout).Self?.DNSName?.replace(/\.$/, '');
-    if (dns) tailnet = { at: Date.now(), url: `https://${dns}:${HTTPS_PORT}` };
+    if (dns) tailnet = { ...tailnet, url: `https://${dns}:${HTTPS_PORT}` };
   } catch {}
 }
 async function ensureServe() {
   const bin = tsBin();
   if (!bin) {
-    tailnet = { ...tailnet, at: Date.now() };
+    tailnet = { ...tailnet, at: Date.now(), ok: true };
     return;
   }
+  let ok = false;
   try {
     let running = false;
     try {
@@ -417,7 +421,7 @@ async function ensureServe() {
       const st = JSON.parse(stdout);
       running = st.BackendState === 'Running' && Boolean(st.Self?.Online);
       const dns = st.Self?.DNSName?.replace(/\.$/, '');
-      if (dns) tailnet = { at: Date.now(), url: `https://${dns}:${HTTPS_PORT}` };
+      if (dns) tailnet = { ...tailnet, url: `https://${dns}:${HTTPS_PORT}` };
     } catch {}
     if (!running) {
       if (!openedTailscale && process.platform === 'darwin' && !process.env.MACBUILD_TAILSCALE) {
@@ -426,18 +430,28 @@ async function ensureServe() {
       }
       await run(bin, ['up', '--timeout', '20s'], { timeout: 25000 }).catch(() => {});
     }
-    await run(bin, ['serve', '--bg', `--https=${HTTPS_PORT}`, `http://127.0.0.1:${PORT}`], { timeout: 10000 })
-      .catch((error) => console.error('tailscale serve', error.message.split('\n')[0]));
+    await run(bin, ['serve', '--bg', `--https=${HTTPS_PORT}`, `http://127.0.0.1:${PORT}`], { timeout: 10000 });
+    ok = true;
     await refreshTailnet();
-  } finally {
-    tailnet = { at: Date.now(), url: tailnet.url };
+  } catch (error) {
+    console.error('tailscale serve', error.message.split('\n')[0]);
   }
+  tailnet = { at: Date.now(), url: tailnet.url, ok };
 }
 async function keepTailscale() {
-  if (Date.now() - tailnet.at < 15000) return;
+  const wait = tailnet.ok ? SERVE_OK_MS : SERVE_RETRY_MS;
+  if (Date.now() - tailnet.at < wait) return;
   if (ensuring) return ensuring;
   ensuring = ensureServe().finally(() => { ensuring = null; });
   return ensuring;
+}
+async function holdTailscale() {
+  const deadline = Date.now() + SERVE_GIVE_UP_MS;
+  for (;;) {
+    await keepTailscale();
+    if (tailnet.ok || Date.now() >= deadline) return;
+    await new Promise((resolve) => { setTimeout(resolve, SERVE_RETRY_MS); });
+  }
 }
 function plistLogin(file) {
   try { return /<key>RunAtLoad<\/key>\s*<true\/>/.test(readFileSync(file, 'utf8')); } catch { return false; }
@@ -1261,5 +1275,5 @@ createServer(async (req, res) => {
 }).listen(PORT, '127.0.0.1', () => {
   console.log(`macbuild UI on 127.0.0.1:${PORT}`);
   recoverInterrupted().catch((error) => console.error('recover', error.message)).finally(() => { prune(); next(); });
-  keepTailscale().catch((error) => console.error('tailscale', error.message));
+  holdTailscale().catch((error) => console.error('tailscale', error.message));
 });
