@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnose } from '../lib/diagnose.mjs';
-import { parseAskChoice, pickAskJob, promptForAsk, titleOfAsk } from '../lib/ask.mjs';
+import { listAskChoices, parseAskChoice, pickAskJob, promptForAsk, titleOfAsk } from '../lib/ask.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const MACBUILD = join(ROOT, 'bin/macbuild');
@@ -15,6 +15,45 @@ test('parseAskChoice fills a known Grok or Codex model', () => {
   assert.deepEqual(parseAskChoice('grok', 'grok-4.7'), { provider: 'grok', model: 'grok-4.7' });
   assert.deepEqual(parseAskChoice('codex', ''), { provider: 'codex', model: 'gpt-6.1-sol' });
   assert.deepEqual(parseAskChoice('', ''), { provider: '', model: '' });
+});
+
+test('listAskChoices reads T3’s enabled providers', () => {
+  const home = mkdtempSync(join(tmpdir(), 'macbuild-t3-'));
+  mkdirSync(join(home, 'userdata'), { recursive: true });
+  mkdirSync(join(home, 'caches'), { recursive: true });
+  writeFileSync(join(home, 'userdata/settings.json'), JSON.stringify({
+    providerInstances: {
+      grok: { driver: 'grok', displayName: 'Grok', enabled: true },
+      claudeAgent_2: { driver: 'claudeAgent', displayName: 'Claude', enabled: true },
+      cursor: { driver: 'cursor', displayName: 'Cursor', enabled: false },
+    },
+  }));
+  writeFileSync(join(home, 'userdata/model-manifest.json'), JSON.stringify({
+    manifest: { currentModels: { claudeAgent: ['claude-opus-5-5', 'claude-sonnet-5-5'] } },
+  }));
+  writeFileSync(join(home, 'caches/grok.json'), JSON.stringify({
+    displayName: 'Grok', models: [
+      { slug: 'grok-4.7', name: 'Grok 4.7', isDefault: true },
+      { slug: 'grok-4.6', name: 'Grok 4.6' },
+    ],
+  }));
+  writeFileSync(join(home, 'caches/claudeAgent_2.json'), JSON.stringify({
+    displayName: 'Claude', models: [
+      { slug: 'claude-opus-5-5', name: 'Claude Opus 5.5', isDefault: true },
+      { slug: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
+      { slug: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+    ],
+  }));
+  writeFileSync(join(home, 'caches/cursor.json'), JSON.stringify({
+    displayName: 'Cursor', enabled: false, models: [{ slug: 'default', name: 'Cursor' }],
+  }));
+  const choices = listAskChoices(home);
+  assert.ok(choices.some((item) => item.provider === 'grok' && item.model === 'grok-4.6' && item.group === 'Grok'));
+  assert.ok(choices.some((item) => item.provider === 'claudeAgent_2' && item.model === 'claude-opus-5-5' && item.group === 'Claude'));
+  assert.ok(choices.some((item) => item.provider === 'claudeAgent_2' && item.model === 'claude-sonnet-5-5'));
+  assert.equal(choices.some((item) => item.model === 'claude-opus-4-6'), false);
+  assert.equal(choices.some((item) => item.provider === 'cursor'), false);
+  assert.deepEqual(parseAskChoice('claudeAgent_2', 'claude-opus-5-5'), { provider: 'claudeAgent_2', model: 'claude-opus-5-5' });
 });
 
 test('pickAskJob prefers a failed job for a project name', () => {

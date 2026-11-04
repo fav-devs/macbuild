@@ -13,7 +13,7 @@ import { diagnose } from '../lib/diagnose.mjs';
 import { listDevices, pickDevice, preferredDeviceId, tryInstall } from '../lib/device.mjs';
 import { readProfiles } from '../lib/profile.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
-import { ASK_CHOICES, parseAskChoice, startAsk } from '../lib/ask.mjs';
+import { listAskChoices, parseAskChoice, startAsk } from '../lib/ask.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -369,13 +369,14 @@ const AUTO_INSTALL = new Set(['off', 'wifi', 'always']);
 const autoInstallMode = () => (AUTO_INSTALL.has(config().autoInstall) ? config().autoInstall : 'off');
 const settingsView = () => {
   const { webhook, githubStatus, appleTeam, askProvider, askModel } = config();
-  const ask = ASK_CHOICES.find((item) => item.provider === askProvider && item.model === askModel)
-    || ASK_CHOICES.find((item) => item.model === askModel)
+  const choices = listAskChoices();
+  const ask = choices.find((item) => item.provider === askProvider && item.model === askModel)
+    || choices.find((item) => item.model === askModel)
     || { provider: '', model: '' };
   // The webhook's host only: the rest of its URL is a secret.
   return {
     webhook: webhook ? hostOf(webhook) || 'set' : '', githubStatus: Boolean(githubStatus), appleTeam: appleTeam ?? '',
-    autoInstall: autoInstallMode(), askProvider: ask.provider, askModel: ask.model, askChoices: ASK_CHOICES,
+    autoInstall: autoInstallMode(), askProvider: ask.provider, askModel: ask.model, askChoices: choices,
   };
 };
 
@@ -1067,8 +1068,9 @@ async function settings(req, res) {
   if (askProvider !== undefined || askModel !== undefined) {
     if (!askProvider && !askModel) { changes.askProvider = undefined; changes.askModel = undefined; }
     else {
-      const ask = ASK_CHOICES.find((item) => item.provider === askProvider && item.model === askModel)
-        || ASK_CHOICES.find((item) => item.model === askModel);
+      const choices = listAskChoices();
+      const ask = choices.find((item) => item.provider === askProvider && item.model === askModel)
+        || choices.find((item) => item.model === askModel);
       if (!ask) return json(res, 400, { error: 'Unknown agent model.' });
       changes.askProvider = ask.provider;
       changes.askModel = ask.model;

@@ -154,9 +154,19 @@ const parseAskValue = (value) => {
   return { provider, model: rest.join(':') };
 };
 function askOptions(selected = '') {
-  return askChoices().map((item) => {
-    const value = askValue(item);
-    return `<option value="${esc(value)}" ${value === selected ? 'selected' : ''}>${esc(item.label)}</option>`;
+  const items = askChoices();
+  const groups = [];
+  for (const item of items) {
+    const name = item.group || '';
+    if (!groups.length || groups[groups.length - 1].name !== name) groups.push({ name, items: [] });
+    groups[groups.length - 1].items.push(item);
+  }
+  return groups.map((group) => {
+    const options = group.items.map((item) => {
+      const value = askValue(item);
+      return `<option value="${esc(value)}" ${value === selected ? 'selected' : ''}>${esc(item.label)}</option>`;
+    }).join('');
+    return group.name ? `<optgroup label="${esc(group.name)}">${options}</optgroup>` : options;
   }).join('');
 }
 // Runs work again after ms (a number, or a function returning one) until the page changes or work returns 'stop'.
@@ -1209,7 +1219,7 @@ async function settingsPage() {
           <div class="seg" role="group" aria-label="Install on iPhone" id="auto-install">${[['off', 'Off'], ['wifi', 'Wi-Fi'], ['always', 'Always']].map(([value, label]) => `<button type="button" data-auto-install="${value}" class="${(settings.autoInstall || 'off') === value ? 'on' : ''}">${label}</button>`).join('')}</div></div>
         <a class="row compact" href="#/setup"><span class="main"><span class="title">Setup guide</span></span>${icon('right', 'sm')}</a>
       </div>`)}
-      ${card('Agent', 'braces', `<div class="setting"><div><b>Default model</b><small>Send to agent uses this and opens T3 Code in that app’s folder.</small></div>
+      ${card('Agent', 'braces', `<div class="setting"><div><b>Default model</b><small>T3 agents signed in on this Mac. Send opens T3 Code in that app’s folder.</small></div>`
         <select class="select" id="ask-model" aria-label="Default agent model">
           <option value="">Ask each time</option>
           ${askOptions(settings.askModel ? `${settings.askProvider}:${settings.askModel}` : '')}
