@@ -15,6 +15,7 @@ HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../l
 ROOT=$(cd "$HERE/.." && pwd)
 CONFIG="$HOME/.config/macbuild"; PROJECTS="${MACBUILD_PROJECTS:-$CONFIG/projects.conf}"
 [ -f "$CONFIG/env" ] && . "$CONFIG/env"
+export MACBUILD_APPLE_ID MACBUILD_APPLE_PASSWORD_FILE
 add_project() {
   local name="$1" dir
   dir=$(cd "$2" 2>/dev/null && pwd) || { echo "no such folder: $2"; return 1; }
@@ -122,7 +123,8 @@ run_eas() {
         spec="${SPECS[$i]}"; pattern="${spec%%|*}"; reply="${spec#*|}"
         text=$(clean | tail -c +$(( SEEN[i] + 1 )) | tail -c 8000)
         if printf '%s' "$text" | grep -q -F "$pattern"; then
-          printf '{"text":"%s"}\n' "$reply" > "$fifo"; sleep 2; SEEN[$i]=$(clean | wc -c)
+          SEEN[$i]=$(clean | wc -c)
+          printf '{"text":"%s"}\n' "$reply" > "$fifo"; sleep 2
         fi
       done
       sleep 2
@@ -170,7 +172,8 @@ run_eas build --platform ios --profile "$PROFILE" --local --output "$IPA"; STATU
 if [ ! -f "$IPA" ]; then
   echo "build failed (exit $STATUS); log: $LOG"; clean | grep -E "❌|error:|Error:" | head -8; exit 1
 fi
-DEST="${OUT:-$HOME/Desktop/$NAME-$PROFILE.ipa}"; cp "$IPA" "$DEST"
+DEST="${OUT:-$HOME/Desktop/$NAME-$PROFILE.ipa}"
+cp "$IPA" "$DEST" || { echo "could not copy IPA to $DEST" >&2; exit 1; }
 echo "IPA: $DEST ($(du -h "$IPA" | cut -f1)) in $(( (SECONDS-START)/60 )) min"
 if [ "$SEND" = 1 ]; then
   [ -n "$TAILDROP" ] || { echo "set MACBUILD_TAILDROP_TARGET"; exit 1; }
@@ -178,7 +181,18 @@ if [ "$SEND" = 1 ]; then
 fi
 if [ "$INSTALL" = 1 ]; then
   [ -n "$DEVICE" ] || { echo "set MACBUILD_DEVICE"; exit 1; }
-  xcrun devicectl device install app --device "$DEVICE" "$IPA" 2>&1 | tail -6
+  INSTALL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/macbuild-install.XXXXXX") || exit 1
+  if ! unzip -q "$IPA" 'Payload/*' -d "$INSTALL_DIR"; then
+    rm -rf "$INSTALL_DIR"; echo "could not extract app from IPA" >&2; exit 1
+  fi
+  APP_BUNDLES=("$INSTALL_DIR"/Payload/*.app)
+  if [ "${#APP_BUNDLES[@]}" -ne 1 ] || [ ! -d "${APP_BUNDLES[0]}" ]; then
+    rm -rf "$INSTALL_DIR"; echo "IPA must contain one app bundle" >&2; exit 1
+  fi
+  xcrun devicectl device install app --device "$DEVICE" "${APP_BUNDLES[0]}" 2>&1 | tail -6
+  STATUS=${PIPESTATUS[0]}
+  rm -rf "$INSTALL_DIR"
+  [ "$STATUS" = 0 ] || { echo "install failed (exit $STATUS)" >&2; exit "$STATUS"; }
 fi
 if [ "$TESTFLIGHT" = 1 ]; then
   echo "uploading to TestFlight"

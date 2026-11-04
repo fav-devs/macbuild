@@ -113,11 +113,22 @@ async function slug(repo) {
   const remote = await git(repo, 'remote', 'get-url', 'origin');
   return remote.match(/github\.com[:/]([^/]+\/[^/.]+)/)?.[1] ?? '';
 }
-const fetched = new Map();
-async function refresh(repo) {
-  if (Date.now() - (fetched.get(repo) ?? 0) < 30000) return;
-  fetched.set(repo, Date.now());
-  await git(repo, 'fetch', '-q', '--prune', 'origin');
+const remoteCache = new Map();
+function refresh(repo, repoSlug) {
+  let cached = remoteCache.get(repo);
+  if (!cached) {
+    cached = { at: 0, prs: [], pending: null };
+    remoteCache.set(repo, cached);
+  }
+  if (!cached.pending && Date.now() - cached.at >= 30000) {
+    cached.pending = Promise.all([
+      run('git', ['-C', repo, 'fetch', '-q', '--prune', 'origin'], { timeout: 12000 }).catch(() => null),
+      repoSlug ? gh('pr', 'list', '--repo', repoSlug, '--state', 'open', '--limit', '30', '--json', 'number,headRefName,title,url') : null,
+    ]).then(([, prs]) => {
+      if (prs) cached.prs = prs;
+    }).finally(() => { cached.at = Date.now(); cached.pending = null; });
+  }
+  return cached;
 }
 async function gh(...args) {
   try { return JSON.parse((await run('gh', args, { timeout: 12000, maxBuffer: 1 << 24 })).stdout); } catch { return null; }
@@ -174,10 +185,11 @@ async function commits(project, branch) {
 }
 async function projectDetail(project) {
   const repo = await repoOf(project.name);
-  await refresh(repo);
-  const refs = await git(repo, 'for-each-ref', 'refs/remotes/origin', '--sort=-committerdate', '--count=30', '--format=%(refname:lstrip=3)%1f%(objectname:short)%1f%(subject)%1f%(authorname)%1f%(committerdate:unix)');
   const repoSlug = await slug(repo);
-  const prs = repoSlug ? (await gh('pr', 'list', '--repo', repoSlug, '--state', 'open', '--limit', '30', '--json', 'number,headRefName,title,url')) ?? [] : [];
+  const remote = refresh(repo, repoSlug);
+  const refreshing = Boolean(remote.pending);
+  const refs = await git(repo, 'for-each-ref', 'refs/remotes/origin', '--sort=-committerdate', '--count=30', '--format=%(refname:lstrip=3)%1f%(objectname:short)%1f%(subject)%1f%(authorname)%1f%(committerdate:unix)');
+  const prs = remote.prs;
   const branches = refs.split('\n').filter(Boolean).map((line) => {
     const [name, short, subject, author, time] = line.split('\x1f');
     return { name, short, subject, author, date: Number(time) * 1000, pr: prs.find((pr) => pr.headRefName === name) ?? null };
@@ -188,7 +200,7 @@ async function projectDetail(project) {
   const current = await git(repo, 'branch', '--show-current');
   const behind = current ? Number(await git(repo, 'rev-list', '--count', `HEAD..origin/${current}`)) || 0 : 0;
   return {
-    ...(await describe(project)), repo: repoSlug, behind, branches, profiles: easProfiles(project.dir), builds: builds.slice(0, 30),
+    ...(await describe(project)), repo: repoSlug, refreshing, behind, branches, profiles: easProfiles(project.dir), builds: builds.slice(0, 30),
     signing: builds.find((build) => build.signing)?.signing ?? null, storeSigning: builds.find((build) => build.signing && !build.installable)?.signing ?? null,
     stats: { total: done.length, passed: done.filter((build) => build.status === 'success').length, median: times[Math.floor(times.length / 2)] ?? 0 },
     triggers: config().triggers.filter((rule) => rule.project === project.name),
@@ -244,6 +256,7 @@ async function system() {
 }
 // Read-only Expo data through the CLI, cached so a page view does not cost a round of network calls.
 const expoCache = new Map();
+const expoPending = new Map();
 async function eas(dir, ...args) {
   const { stdout } = await run('eas', args, { cwd: dir, timeout: 30000, maxBuffer: 1 << 24 });
   return stdout;
@@ -256,6 +269,12 @@ const envNames = async (dir, environment) => (await eas(dir, 'env:list', environ
 async function expo(project) {
   const cached = expoCache.get(project.name);
   if (cached && Date.now() - cached.at < 300000) return cached.data;
+  if (expoPending.has(project.name)) return expoPending.get(project.name);
+  const pending = loadExpo(project).finally(() => expoPending.delete(project.name));
+  expoPending.set(project.name, pending);
+  return pending;
+}
+async function loadExpo(project) {
   const safe = (work) => work.catch((error) => { console.error('expo', project.name, error.message.split('\n')[0]); return null; });
   const team = config().appleTeam ?? process.env.MACBUILD_APPLE_TEAM;
   const [info, submissions, channels, cloud, production, preview, development, devices] = await Promise.all([

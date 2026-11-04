@@ -8,7 +8,7 @@ PORT=${MACBUILD_UI_PORT:-4180}; HTTPS=${MACBUILD_UI_HTTPS_PORT:-8443}
 HOST=""; [ -n "$TS" ] && HOST=$("$TS" status --json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
 URL=${HOST:+https://$HOST:$HTTPS}; URL=${URL:-http://localhost:$PORT}
 (cd "$HERE/ui" && npm install --omit=dev --no-audit --no-fund >/dev/null)
-NODE=$(command -v node); PLIST="$HOME/Library/LaunchAgents/local.macbuild.ui.plist"; mkdir -p "$HOME/Library/Logs"
+NODE=$(command -v node); PLIST="$HOME/Library/LaunchAgents/local.macbuild.ui.plist"; mkdir -p "$HOME/Library/Logs" "$(dirname "$PLIST")"
 cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
