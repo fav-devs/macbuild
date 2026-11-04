@@ -382,14 +382,14 @@ function diskItems() {
   const home = homedir();
   const derived = join(home, 'Library/Developer/Xcode/DerivedData');
   return [
-    { key: 'derived', label: 'Xcode build files', path: derived, except: 'CompilationCache.noindex', note: 'DerivedData without the compilation cache. Xcode recreates what it needs.' },
-    { key: 'compile-cache', label: 'Compilation cache', path: join(derived, 'CompilationCache.noindex'), note: 'What makes --fast builds fast. The next build after clearing it is slower.' },
-    { key: 'device-support', label: 'iOS device support', path: join(home, 'Library/Developer/Xcode/iOS DeviceSupport'), note: 'Symbols for each iOS version you’ve connected. Xcode copies them again when needed.' },
-    { key: 'pods', label: 'CocoaPods cache', path: join(home, 'Library/Caches/CocoaPods'), note: 'Downloaded pods. Builds download them again.' },
-    { key: 'gradle', label: 'Gradle cache', path: join(home, '.gradle/caches'), note: 'Android dependencies and build outputs.' },
-    { key: 'work', label: 'macbuild work folders', path: join(home, '.cache/macbuild'), note: 'Work folders and checkouts left from earlier builds.' },
-    { key: 'simulators', label: 'Unavailable simulators', command: ['xcrun', 'simctl', 'delete', 'unavailable'], path: join(home, 'Library/Developer/CoreSimulator/Devices'), note: 'Removes simulators for iOS versions that are no longer installed. The size is all simulators.' },
-    { key: 'history', label: 'Build history and IPAs', path: DATA, keep: true, note: `The dashboard keeps the last ${KEEP_BUILDS} builds and ${KEEP_IPAS} IPAs on its own.` },
+    { key: 'derived', label: 'Xcode build files', path: derived, except: 'CompilationCache.noindex' },
+    { key: 'compile-cache', label: 'Compilation cache', path: join(derived, 'CompilationCache.noindex') },
+    { key: 'device-support', label: 'iOS device support', path: join(home, 'Library/Developer/Xcode/iOS DeviceSupport') },
+    { key: 'pods', label: 'CocoaPods cache', path: join(home, 'Library/Caches/CocoaPods') },
+    { key: 'gradle', label: 'Gradle cache', path: join(home, '.gradle/caches') },
+    { key: 'work', label: 'macbuild work folders', path: join(home, '.cache/macbuild') },
+    { key: 'simulators', label: 'Unavailable simulators', command: ['xcrun', 'simctl', 'delete', 'unavailable'], path: join(home, 'Library/Developer/CoreSimulator/Devices') },
+    { key: 'history', label: 'Build history and IPAs', path: DATA, keep: true },
   ];
 }
 const sizeOf = async (path) => {
@@ -403,7 +403,7 @@ async function disk(fresh = false) {
   const sizes = await Promise.all(items.map((item) => sizeOf(item.path)));
   const exceptSize = await sizeOf(join(items[0].path, items[0].except));
   sizes[0] = sizes[0] === null ? null : Math.max(0, sizes[0] - (exceptSize ?? 0));
-  const data = { items: items.map(({ key, label, note, keep }, index) => ({ key, label, note, bytes: sizes[index], cleanable: !keep })), measuredAt: Date.now() };
+  const data = { items: items.map(({ key, label, keep }, index) => ({ key, label, bytes: sizes[index], cleanable: !keep })), measuredAt: Date.now() };
   diskCache = { at: Date.now(), data };
   return data;
 }
@@ -550,8 +550,56 @@ async function watchRules() {
 setInterval(() => watchRules().catch((error) => console.error('watch', error.message)), 60000);
 
 let current = null;
+const orphans = new Set();
+const buildSucceeded = (text) => /^Build successful\s*$/m.test(text) || /^macbuild: unchanged since /m.test(text);
+const logFresh = (id, ms = 30000) => existsSync(logPath(id)) && Date.now() - statSync(logPath(id)).mtimeMs < ms;
+function followOrphan(build) {
+  if (orphans.has(build.id)) return;
+  orphans.add(build.id);
+  const tracker = setInterval(() => trackPhases(build.id), 2000);
+  const tick = async () => {
+    const latest = read(build.id);
+    const text = logText(build.id);
+    if (buildSucceeded(text)) {
+      clearInterval(tracker);
+      orphans.delete(build.id);
+      try { await finish(latest, 0); } catch (error) { console.error('finish', build.id, error.message); }
+      if (!orphans.size) { prune(); next(); }
+      return;
+    }
+    if (!logFresh(build.id, 45000)) {
+      clearInterval(tracker);
+      orphans.delete(build.id);
+      if (['running', 'cancelling'].includes(latest.status)) {
+        save({ ...latest, status: 'failed', reason: 'The UI restarted during this build', finishedAt: Date.now() });
+      }
+      if (!orphans.size) next();
+      return;
+    }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 2000);
+}
+async function recoverInterrupted() {
+  for (const build of allBuilds()) {
+    const restartFail = build.status === 'failed' && build.reason === 'The UI restarted during this build';
+    if (!['running', 'cancelling'].includes(build.status) && !restartFail) continue;
+    const text = logText(build.id);
+    if (buildSucceeded(text)) {
+      await finish({ ...read(build.id), status: build.status === 'cancelling' ? 'cancelling' : 'running' }, 0);
+      continue;
+    }
+    if (['running', 'cancelling'].includes(build.status) && logFresh(build.id)) {
+      followOrphan(build);
+      continue;
+    }
+    if (['running', 'cancelling'].includes(build.status)) {
+      save({ ...build, status: 'failed', reason: 'The UI restarted during this build', finishedAt: Date.now() });
+    }
+  }
+}
 async function next() {
-  if (current) return;
+  if (current || orphans.size) return;
   const build = allBuilds().findLast((candidate) => candidate.status === 'queued');
   if (!build) return;
   const args = [build.project, '--platform', platformOf(build), '--profile', build.profile, '--fast', '--output', artifactOf(build)];
@@ -585,6 +633,7 @@ async function finish(build, code) {
   build.status = build.status === 'cancelling' ? 'cancelled' : code !== 0 ? 'failed' : reused ? 'skipped' : 'success';
   build.finishedAt = Date.now();
   if (build.status === 'failed') { build.reason = failure(text); build.hint = diagnose(text); }
+  else { delete build.reason; delete build.hint; }
   build.submission = text.match(/https:\/\/expo\.dev\S+\/submissions\/[0-9a-f-]+/)?.[0];
   if (build.status === 'skipped') {
     // The earlier build this one stands for: one of the dashboard's own when its file is in a build folder, else a copy.
@@ -614,11 +663,15 @@ async function finish(build, code) {
 function cancel(id) {
   const build = read(id);
   if (build.status === 'queued') return save({ ...build, status: 'cancelled', finishedAt: Date.now() });
-  if (current?.id !== id) return;
+  if (current?.id !== id && !orphans.has(id)) return;
   save({ ...build, status: 'cancelling' });
-  const { pid } = current.child;
-  try { process.kill(-pid, 'SIGTERM'); } catch {}
-  setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch {} }, 5000);
+  const pid = current?.id === id ? current.child?.pid : null;
+  if (pid) {
+    try { process.kill(-pid, 'SIGTERM'); } catch {}
+    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch {} }, 5000);
+    return;
+  }
+  spawn('pkill', ['-TERM', '-f', logPath(id)], { stdio: 'ignore' });
 }
 // Opens a simulator build in the Simulator on this Mac, booting an iPhone simulator if none is running.
 async function openInSimulator(build) {
@@ -639,10 +692,7 @@ async function openInSimulator(build) {
   await run('xcrun', ['simctl', 'launch', device, bundle], { timeout: 60000 });
   return { bundle };
 }
-for (const build of allBuilds()) {
-  if (['running', 'cancelling'].includes(build.status)) save({ ...build, status: 'failed', reason: 'The UI restarted during this build', finishedAt: Date.now() });
-}
-prune();
+
 
 // DNS rebinding: a web page can point its own domain at 127.0.0.1, which makes its requests same-origin, so they could
 // send the x-macbuild header. Every request has to name this server: loopback, the tailnet name Tailscale serve keeps in
@@ -868,4 +918,7 @@ createServer(async (req, res) => {
     console.error(error);
     if (!res.headersSent) json(res, 500, { error: 'server error' });
   }
-}).listen(PORT, '127.0.0.1', () => { console.log(`macbuild UI on 127.0.0.1:${PORT}`); next(); });
+}).listen(PORT, '127.0.0.1', () => {
+  console.log(`macbuild UI on 127.0.0.1:${PORT}`);
+  recoverInterrupted().catch((error) => console.error('recover', error.message)).finally(() => { prune(); next(); });
+});

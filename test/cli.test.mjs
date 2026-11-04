@@ -182,6 +182,39 @@ test('a simulator profile builds a .tar.gz, and an unknown profile is refused', 
   const missing = run(['myapp', '--profile', 'nope']);
   assert.equal(missing.status, 1);
   assert.match(missing.stdout, /no build profile "nope"/);
+  const uiLog = join(home, 'ui.log');
+  const hidden = run(['myapp', '--profile', 'nope'], { MACBUILD_LOG: uiLog });
+  assert.equal(hidden.status, 1);
+  assert.match(readFileSync(uiLog, 'utf8'), /no build profile "nope"/);
+});
+
+test('builds, log and show read dashboard history', () => {
+  const { home, run } = sandbox();
+  const data = join(home, '.local/share/macbuild/builds');
+  const one = join(data, '20260101010101-myapp');
+  const two = join(data, '20260102020202-other');
+  mkdirSync(one, { recursive: true });
+  mkdirSync(two, { recursive: true });
+  writeFileSync(join(one, 'meta.json'), JSON.stringify({
+    id: '20260101010101-myapp', project: 'myapp', profile: 'development', status: 'failed',
+    reason: 'no build profile "less-dev"', createdAt: 100,
+  }));
+  writeFileSync(join(one, 'build.log'), 'source: main\nno build profile "less-dev" in eas.json\n');
+  writeFileSync(join(two, 'meta.json'), JSON.stringify({
+    id: '20260102020202-other', project: 'other', profile: 'production', status: 'success', createdAt: 200,
+  }));
+  writeFileSync(join(two, 'build.log'), 'Build successful\n');
+  const list = run(['builds']);
+  assert.equal(list.status, 0, list.stdout);
+  assert.match(list.stdout, /20260102020202-other\tsuccess\tother/);
+  assert.match(list.stdout, /20260101010101-myapp\tfailed\tmyapp/);
+  const latest = run(['show']);
+  assert.equal(JSON.parse(latest.stdout).id, '20260102020202-other');
+  const mine = run(['log', 'myapp']);
+  assert.match(mine.stdout, /no build profile "less-dev"/);
+  const dumped = JSON.parse(run(['builds', '--json']).stdout);
+  assert.equal(dumped[0].id, '20260102020202-other');
+  assert.equal(dumped.length, 2);
 });
 
 test('--skip-unchanged reuses a build whose native code is the same', () => {

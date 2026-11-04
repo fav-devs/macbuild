@@ -11,8 +11,9 @@
 #   --fast             fixed work directory + Xcode compilation caching, so later builds reuse compiled output
 #   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
 #   --output PATH      where the build goes (default: your Desktop)
-# Other commands: macbuild list | add <name> <path> | scan | doctor
+# Other commands: macbuild list | add <name> <path> | scan | doctor | builds | log | show
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
+# Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
 START=$SECONDS
 HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../lib" ] || HERE=$(cd "$(dirname "$0")" && pwd)
@@ -90,11 +91,92 @@ doctor() {
   [ -z "$names" ] || no names "rename ${names}in $PROJECTS: letters, digits, '.', '_' and '-' only"
   return $bad
 }
+# History the web UI writes: meta.json + build.log per job. Agents read this instead of scraping the dashboard.
+history() {
+  local mode="$1" query="" json=0 arg
+  shift
+  for arg in "$@"; do
+    [ -n "$arg" ] || continue
+    case "$arg" in --json) json=1;; *) query="$arg";; esac
+  done
+  MACBUILD_DATA="${MACBUILD_DATA:-$HOME/.local/share/macbuild/builds}" python3 - "$mode" "$query" "$json" <<'PY'
+import json, os, sys
+mode, query, as_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+data = os.environ["MACBUILD_DATA"]
+
+def metas():
+    items = []
+    if not os.path.isdir(data):
+        return items
+    for name in os.listdir(data):
+        path = os.path.join(data, name, "meta.json")
+        if not os.path.isfile(path):
+            continue
+        try:
+            meta = json.load(open(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        meta["_dir"] = os.path.join(data, name)
+        items.append(meta)
+    items.sort(key=lambda item: item.get("createdAt") or 0, reverse=True)
+    return items
+
+def pick(items):
+    if not query:
+        return items[0] if items else None
+    for item in items:
+        ident = item.get("id") or ""
+        if ident == query or ident.startswith(query):
+            return item
+    for item in items:
+        if item.get("project") == query:
+            return item
+    return None
+
+def public(item):
+    return {key: value for key, value in item.items() if not key.startswith("_")}
+
+items = metas()
+if mode == "builds":
+    if query:
+        items = [item for item in items if item.get("project") == query or (item.get("id") or "").startswith(query)]
+    if as_json:
+        json.dump([public(item) for item in items], sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        sys.exit(0)
+    if not items:
+        print("no builds yet")
+        sys.exit(0)
+    for item in items[:50]:
+        reason = (item.get("reason") or "").replace("\n", " ")
+        print("{id}\t{status}\t{project}\t{profile}\t{reason}".format(
+            id=item.get("id", ""), status=item.get("status", ""), project=item.get("project", ""),
+            profile=item.get("profile", ""), reason=reason))
+    sys.exit(0)
+
+item = pick(items)
+if item is None:
+    print("no build matching {0}".format(query or "latest"), file=sys.stderr)
+    sys.exit(1)
+if mode == "show":
+    json.dump(public(item), sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    sys.exit(0)
+path = os.path.join(item["_dir"], "build.log")
+if not os.path.isfile(path):
+    print("no log for {0}".format(item.get("id")), file=sys.stderr)
+    sys.exit(1)
+sys.stdout.write(open(path, "r", errors="replace").read())
+PY
+}
 case "${1:-}" in
   list) cat "$PROJECTS" 2>/dev/null; exit 0;;
   add) add_project "${2:?usage: macbuild add <name> <path>}" "${3:?usage: macbuild add <name> <path>}"; exit $?;;
   scan) scan_projects; exit 0;;
   doctor) doctor; exit $?;;
+  builds) history builds "${2:-}" "${3:-}"; exit $?;;
+  log) history log "${2:-}" "${3:-}"; exit $?;;
+  show) history show "${2:-}" "${3:-}"; exit $?;;
 esac
 NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""
 while [ $# -gt 0 ]; do
@@ -180,6 +262,8 @@ fi
 for d in "$HOME"/.nvm/versions/node/*/bin /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin; do [ -d "$d" ] && PATH="$PATH:$d"; done
 [ -n "${MACBUILD_NODE:-}" ] && PATH="$HOME/.nvm/versions/node/$MACBUILD_NODE/bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"; unset DEVELOPER_DIR
+# The web UI ignores this process's stdout, so every later echo has to land in the build log.
+[ -n "$OWN_LOG" ] && exec >> "$LOG" 2>&1
 [ "$PLATFORM" = android ] && android_env
 # macbuild owns the EAS work directory: --fast keeps one per app and profile (cleared when the next one starts) and
 # every other build gets a fresh one, removed when it ends.
@@ -329,7 +413,9 @@ if [ "$SKIPPED" = 0 ]; then
   # This run's build: a path of its own, so a failed build can't pick up another build's output.
   BUILT="$CACHE/$NAME-$PROFILE.$$.$EXT"
   echo "building $NAME for $PLATFORM ($PROFILE) on this Mac, log: $LOG"
-  run_eas build --platform "$PLATFORM" --profile "$PROFILE" --local --output "$BUILT"; STATUS=$?
+  # --non-interactive skips credential reuse menus when EAS already has certs/profiles.
+  # Only with --ref: eas aborts a dirty working copy under --non-interactive.
+  run_eas build --platform "$PLATFORM" --profile "$PROFILE" --local ${REF:+--non-interactive} --output "$BUILT"; STATUS=$?
   if [ ! -f "$BUILT" ]; then
     echo "build failed (exit $STATUS); log: $LOG"; clean | grep -E "❌|error:|Error:|FAILURE" | head -8; explain; exit 1
   fi

@@ -114,7 +114,7 @@ const hasFile = (build) => Boolean(build.ipaBytes && !build.expired && (build.st
 const fixHtml = (text) => esc(text).replace(/`([^`]+)`/g, '<code>$1</code>');
 const RULE_KINDS = { push: 'On every push', pr: 'Pull requests', nightly: 'Every night' };
 const ruleTitle = (rule) => ((rule.on ?? 'push') === 'pr' ? 'Each pull request' : rule.on === 'nightly' ? `${esc(rule.branch)} every night at ${esc(rule.at)}` : `${esc(rule.branch)} on every push`);
-const ruleDetail = (rule) => `${rule.platform === 'android' ? 'Android' : 'iOS'} · ${esc(rule.profile)}${rule.submit ? ` · then ${storeName(rule.platform)}` : ''}${rule.skipUnchanged ? ' · reuses unchanged builds' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ''}`;
+const ruleDetail = (rule) => `${rule.platform === 'android' ? 'Android' : 'iOS'} · ${esc(rule.profile)}${rule.submit ? ` · ${storeName(rule.platform)}` : ''}${rule.skipUnchanged ? ' · reuses' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ''}`;
 const statusIcon = (status) => `<span class="st ${status}" role="img" aria-label="${STATUS[status][0]}">${icon(STATUS[status][1])}</span>`;
 const badge = (status) => `<span class="badge ${status}">${STATUS[status][0]}</span>`;
 const profileTag = (build) => (submits(build) ? `<span class="tag store">${icon('send')}${storeName(build.platform)}</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
@@ -175,7 +175,7 @@ async function expoOf(name) {
 // Shell: the sidebar, with the Mac itself at the bottom, on wide screens; tabs on a phone.
 const SECTIONS = {
   overview: ['Overview', 'home'], builds: ['Builds', 'layers'], branches: ['Branches', 'branch'], submissions: ['Submissions', 'send'],
-  channels: ['Update channels', 'radio'], signing: ['Signing', 'shield'], environment: ['Environment', 'braces'], automation: ['Build automation', 'bolt'],
+  channels: ['Channels', 'radio'], signing: ['Signing', 'shield'], environment: ['Environment', 'braces'], automation: ['Automation', 'bolt'],
 };
 const ALIASES = { activity: 'builds', insights: 'overview', devices: 'signing' };
 function parseRoute() {
@@ -226,7 +226,7 @@ function machineCard() {
     <div class="machine-head"><span class="led ${current ? 'busy' : 'idle'}"></span><span>${esc(machine.name || 'This Mac')}</span></div>
     <div class="spec">${esc([machine.chip, machine.macos && `macOS ${machine.macos}`].filter(Boolean).join(' · ') || 'Builds run here')}</div>
     ${current ? `<a class="now" href="#/build/${esc(current.id)}">${avatar(current.project, 'xs')}<span><b>Building ${esc(current.project)}</b> · <span class="num" data-since="${current.startedAt}">${span(Date.now() - current.startedAt)}</span></span></a>`
-      : `<div class="now">${icon('check', 'sm ok')}<span>Idle${system.queued ? `, ${system.queued} queued` : ', ready to build'}</span></div>`}
+      : `<div class="now">${icon('check', 'sm ok')}<span>Idle${system.queued ? `, ${system.queued} queued` : ''}</span></div>`}
     <div class="meter"><div class="meter-label"><span>Disk</span><span>${gb(system.diskFree)} free</span></div><div class="bar ${used > 0.9 ? 'low' : ''}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>
   </div>`;
 }
@@ -299,7 +299,7 @@ function liveCard(builds) {
   if (!running && !queued.length) return '';
   const kind = (build) => `${build.platform === 'android' ? 'Android · ' : ''}${kindOf(build)}`;
   return `<section class="card live">
-    <div class="live-head"><span class="led busy"></span><b>${running ? 'Building now' : 'Up next'}</b><span>on ${esc(machineName())}</span></div>
+    <div class="live-head"><span class="led busy"></span><b>${running ? 'Building now' : 'Up next'}</b></div>
     ${running ? `<a class="live-main" href="#/build/${esc(running.id)}">
       <span class="who">${avatar(running.project, 'lg')}<div><span class="title">${esc(subject(running))}</span><span class="meta">${esc(running.project)}<span class="sep"></span>${esc(refOf(running))}<span class="sep"></span><span class="mono">${esc(short(running))}</span><span class="sep"></span>${esc(kind(running))}</span></div></span>
       <span class="live-progress">${progress(running)}</span></a>` : ''}
@@ -359,7 +359,7 @@ const matches = (filter) => (build) => filter === 'all' || (filter === 'active' 
 async function buildsPage() {
   let { builds } = await get('/api/builds');
   app.innerHTML = `${mobileTop()}
-    ${header('Builds', `Every build on ${esc(machineName())}, newest first.`, `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}
+    ${header('Builds', '', `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}
     <div id="install"></div><div id="live"></div>
     <div class="toolbar"><label class="search">${icon('search')}<input id="q" type="search" placeholder="Search commits, branches, people" aria-label="Search builds" value="${esc(prefs.query)}"></label>
       <div class="seg" role="group" aria-label="Show">${Object.entries(FILTERS).map(([key, label]) => `<button data-filter="${key}" class="${prefs.filter === key ? 'on' : ''}" aria-pressed="${prefs.filter === key}">${key === 'testflight' && builds.some((build) => build.platform === 'android') ? 'Store uploads' : label}</button>`).join('')}</div></div>
@@ -369,7 +369,7 @@ async function buildsPage() {
     const words = prefs.query.trim().toLowerCase();
     const shown = builds.filter(matches(prefs.filter)).filter((build) => !words || `${build.project} ${refOf(build)} ${short(build)} ${subject(build)} ${build.commit?.author ?? ''} ${build.profile}`.toLowerCase().includes(words));
     $('#list').innerHTML = shown.length ? dayGroups(shown)
-      : `<div class="card">${builds.length ? empty('search', 'No matching builds', 'Try another search, or show all builds.') : empty('layers', 'No builds yet', 'Start one from a project, or run <code>macbuild &lt;project&gt;</code> on your Mac.', `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}</div>`;
+      : `<div class="card">${builds.length ? empty('search', 'No matching builds') : empty('layers', 'No builds yet', '', `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}</div>`;
   };
   draw();
   $('#q').oninput = (event) => { prefs.query = event.target.value; draw(); };
@@ -453,10 +453,10 @@ function buildHead(build) {
 }
 function buildAlert(build) {
   if (['running', 'cancelling'].includes(build.status)) {
-    return `<section class="card live" style="margin-bottom:20px"><div class="live-head"><span class="led busy"></span><b>${build.status === 'cancelling' ? 'Cancelling' : 'Building'}</b><span>on ${esc(machineName())}</span></div>
+    return `<section class="card live" style="margin-bottom:20px"><div class="live-head"><span class="led busy"></span><b>${build.status === 'cancelling' ? 'Cancelling' : 'Building'}</b></div>
       <div class="live-main"><div class="live-progress">${progress(build)}</div></div></section>`;
   }
-  if (build.status === 'queued') return `<div class="callout info" style="margin-bottom:20px">${icon('clock')}<div><b>Waiting for the build ahead of it</b><span class="muted">Builds run one at a time and use the whole Mac.</span></div></div>`;
+  if (build.status === 'queued') return `<div class="callout info" style="margin-bottom:20px">${icon('clock')}<div><b>Waiting</b></div></div>`;
   if (build.status === 'failed') {
     const phase = build.phases?.at(-1)?.name;
     return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}</b>
@@ -464,9 +464,9 @@ function buildAlert(build) {
       ${build.reason ? `<code>${esc(build.reason)}</code>` : ''}<button class="btn sm" data-show-failure>Show the log</button></div></div>`;
   }
   if (build.status === 'skipped') {
-    return `<div class="callout info" style="margin-bottom:20px">${icon('skip')}<div><b>No new build needed</b><span class="muted">The native code is the same as in ${build.reusedFrom ? `<a class="link" href="#/build/${esc(build.reusedFrom)}">an earlier build</a>, so that build was reused` : 'an earlier build, so its file was reused'}. A development build loads JavaScript from Metro, so it only needs rebuilding when native code changes.</span></div></div>`;
+    return `<div class="callout info" style="margin-bottom:20px">${icon('skip')}<div><b>Reused an earlier build</b>${build.reusedFrom ? `<span class="muted"><a class="link" href="#/build/${esc(build.reusedFrom)}">Open it</a></span>` : ''}</div></div>`;
   }
-  if (build.submission) return `<div class="callout info" style="margin-bottom:20px">${icon('send')}<div><b>Uploaded to ${build.platform === 'android' ? 'Google Play' : 'App Store Connect'}</b><span class="muted">${build.platform === 'android' ? 'Google' : 'Apple'} processes the build before testers can install it. </span><a class="link" href="${esc(build.submission)}">View the submission</a></div></div>`;
+  if (build.submission) return `<div class="callout info" style="margin-bottom:20px">${icon('send')}<div><b>Uploaded to ${build.platform === 'android' ? 'Google Play' : 'App Store Connect'}</b> <a class="link" href="${esc(build.submission)}">View</a></div></div>`;
   return '';
 }
 function sizeChange(build) {
@@ -496,20 +496,18 @@ function buildTop(build) {
     ['Signing expires', days !== null ? `<span class="${days < 30 ? 'warn' : ''}">${day(build.signing.expires)} · ${days}d</span>` : ''],
     ['Uncommitted', build.dirty ? `<span class="warn">${plural(build.dirty, 'file')} included</span>` : ''],
   ], 'kv wide')}</div></section>`;
-  const qr = `<img src="/api/builds/${esc(build.id)}/qr.svg" alt="QR code that opens this build on a phone"><p class="qr-note">Scan with a phone’s camera to open this page there.</p>`;
+  const qr = `<img src="/api/builds/${esc(build.id)}/qr.svg" alt="QR code"><p class="qr-note">Scan to open on a phone</p>`;
   let aside = '';
   if (!file) aside = '';
   else if (build.simulator) {
-    aside = card('Simulator', 'phone', `<div class="install"><p>Opens the app in the Simulator on ${esc(machineName())}, starting an iPhone simulator if none is running.</p>
-      <button class="btn primary block" data-simulator="${esc(build.id)}">${icon('phone')}Open in Simulator</button><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download the app</a></div>`);
+    aside = card('Simulator', 'phone', `<div class="install">
+      <button class="btn primary block" data-simulator="${esc(build.id)}">${icon('phone')}Open in Simulator</button><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download</a></div>`);
   } else if (build.platform === 'android' && build.installable) {
-    aside = card('Install on Android', 'phone', `<div class="install">${qr}<a class="btn primary block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download APK</a>
-      <p>On the phone, open this page, download the APK and allow installs from your browser when asked.</p></div>`);
+    aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download APK</a></div>`);
   } else if (build.installable) {
-    aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="${installUrl(build)}">${icon('phone')}Install on iPhone</a>
-      <p>Open in Safari on a device in this build’s provisioning profile${build.signing ? ` (${plural(build.signing.devices, 'device')})` : ''}.</p></div>`);
+    aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="${installUrl(build)}">${icon('phone')}Install on iPhone</a></div>`);
   } else {
-    aside = card('Store build', 'send', `<div class="install"><p>Store builds reach testers through ${storeName(build.platform)} once ${build.platform === 'android' ? 'Google' : 'Apple'} has processed them.</p><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download ${fileKind(build)}</a></div>`);
+    aside = card(storeName(build.platform), 'send', `<div class="install"><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download ${fileKind(build)}</a></div>`);
   }
   return aside ? `<div class="cols main-side">${details}<div class="stack">${aside}</div></div>` : details;
 }
@@ -526,7 +524,7 @@ function loadChecks(build) {
 // One row per phase on a shared timeline. Rows update in place, so open phases and scroll positions survive polls.
 function renderPhases(box, build, groups) {
   if (!groups.length) {
-    box.innerHTML = empty(active(build) ? 'spinner' : 'layers', active(build) ? 'Waiting for the first log line' : 'No log', active(build) ? 'It shows up here as soon as EAS starts.' : '');
+    box.innerHTML = empty(active(build) ? 'spinner' : 'layers', active(build) ? 'Waiting for logs' : 'No log');
     return;
   }
   if (box.querySelector('.empty')) box.innerHTML = '';
@@ -576,7 +574,7 @@ function renderPhases(box, build, groups) {
 
 async function projectsPage() {
   const { projects, builds } = await get('/api/state');
-  app.innerHTML = `${mobileTop()}${header('Projects', `${plural(projects.length, 'app')} that build on ${esc(machineName())}.`, `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}
+  app.innerHTML = `${mobileTop()}${header('Projects', '', `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}
     <div class="pgrid">${projects.map((project) => {
       const mine = builds.filter((build) => build.project === project.name);
       const last = mine[0]; const release = mine.find((build) => build.app)?.app;
@@ -586,18 +584,18 @@ async function projectsPage() {
         ${kv([['Version', release ? `${esc(release.version)} <span class="faint">(${esc(release.number)})</span>` : '<span class="faint">—</span>'], ['Working copy', `${esc(project.branch || 'detached')}${project.dirty ? ` <span class="warn">· ${project.dirty} changed</span>` : ''}`]])}
       </a>`;
     }).join('')}
-    <div class="card pcard add">${icon('plus')}<b>Add a project</b><p>On your Mac, run <code>macbuild add &lt;name&gt; &lt;path&gt;</code> with the folder that holds eas.json, or <code>macbuild scan</code>.</p></div></div>`;
+    <div class="card pcard add">${icon('plus')}<b>Add a project</b><p><code>macbuild add &lt;name&gt; &lt;path&gt;</code> or <code>macbuild scan</code></p></div></div>`;
 }
 
 async function pickPage() {
   const { projects, builds } = await get('/api/state');
   if (projects.length === 1) { location.replace(`#/p/${projects[0].name}/new`); return; }
   app.innerHTML = `<nav class="crumbs"><a href="#/">Builds</a><span class="slash">/</span><span>New build</span></nav>
-    ${header('New build', 'Pick the app to build.')}
+    ${header('New build')}
     <div class="card rows">${projects.map((project) => {
       const last = builds.find((build) => build.project === project.name);
       return `<a class="row" href="#/p/${esc(project.name)}/new">${avatar(project.name, 'lg')}<span class="main"><span class="title">${esc(project.name)}</span><span class="meta">${esc(project.repo || 'Local repository')}<span class="sep"></span>${last ? `last built ${ago(last.createdAt)}` : 'never built'}</span></span>${icon('right', 'chev')}</a>`;
-    }).join('') || empty('apps', 'No projects yet', 'Run <code>macbuild scan</code> on your Mac to find your Expo apps.')}</div>`;
+    }).join('') || empty('apps', 'No projects yet', '<code>macbuild scan</code>')}</div>`;
 }
 
 // Project pages share a header and, on a phone, a row of section tabs.
@@ -611,24 +609,16 @@ async function projectPage({ name, section }) {
         ${data.repo ? `<a href="https://github.com/${esc(data.repo)}">${icon('github', 'sm')}${esc(data.repo)}</a>` : `<span>${icon('branch', 'sm')}Local repository</span>`}
         ${release ? `<span class="mono">${esc(release.id)}</span><span>${icon('tag', 'sm')}${esc(release.version)} (${esc(release.number)})</span>` : ''}</div></div></div>
         <div class="actions">${latestDev ? `<a class="btn" href="#/build/${esc(latestDev.id)}">${icon('phone')}Install latest</a>` : ''}<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a></div></header>`
-    : header(SECTIONS[section][0], SECTION_LEDES[section](data), `<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a>`);
-  const ptabs = `<nav class="ptabs" aria-label="Project sections">${Object.entries(SECTIONS).map(([key, [label]]) => `<a${key === section ? ' class="on" aria-current="page"' : ''} href="#/p/${esc(name)}${key === 'overview' ? '' : `/${key}`}">${label.replace('Build automation', 'Automation').replace('Update channels', 'Channels')}</a>`).join('')}</nav>`;
+    : header(SECTIONS[section][0], '', `<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a>`);
+  const ptabs = `<nav class="ptabs" aria-label="Project sections">${Object.entries(SECTIONS).map(([key, [label]]) => `<a${key === section ? ' class="on" aria-current="page"' : ''} href="#/p/${esc(name)}${key === 'overview' ? '' : `/${key}`}">${label}</a>`).join('')}</nav>`;
   app.innerHTML = `${crumbs}${head}${ptabs}<div id="pbody"></div>`;
   await PROJECT_SECTIONS[section](data, $('#pbody'));
   if (data.refreshing) every(2500, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(name)}`); if (!fresh.refreshing) { route(); return 'stop'; } return undefined; });
 }
-const SECTION_LEDES = {
-  builds: (data) => `${plural(data.builds.length, 'build')} on this Mac, newest first.`,
-  branches: (data) => `${plural(data.branches.length, 'branch', 'branches')} on GitHub. Build any of them in a clean checkout.`,
-  submissions: () => 'Uploads to App Store Connect, from Expo.',
-  channels: () => 'Where over-the-air updates go, from Expo.',
-  signing: () => 'Provisioning profiles from your latest builds, and the devices registered with Apple.',
-  environment: () => 'Variable names on Expo for each environment. Values never reach this page.',
-  automation: () => 'Build automatically on every push, for each pull request, or every night. GitHub is checked every minute.',
-};
+
 function withExpo(name, box, render) {
   expoOf(name).then((expo) => { if (box.isConnected) box.innerHTML = render(expo); })
-    .catch((error) => { if (box.isConnected && error.name !== 'AbortError') box.innerHTML = empty('cloudoff', 'Expo didn’t answer', 'Check that eas-cli is signed in on your Mac. Local builds still work.'); });
+    .catch((error) => { if (box.isConnected && error.name !== 'AbortError') box.innerHTML = empty('cloudoff', 'Expo didn’t answer'); });
 }
 const EXPO_STATUS = { FINISHED: 'success', ERRORED: 'failed', CANCELED: 'cancelled', CANCELLED: 'cancelled', IN_PROGRESS: 'running', IN_QUEUE: 'queued', NEW: 'queued' };
 const expoIcon = (value) => statusIcon(EXPO_STATUS[value] ?? 'running');
@@ -649,16 +639,16 @@ const PROJECT_SECTIONS = {
       <div class="cols main-side">
         <div class="stack">
           ${card('Latest builds', 'layers', `<div class="rows latest">${latestRow(dev, 'Development')}${latestRow(prod, 'Production')}</div>`, more(`#/p/${esc(name)}/builds`, 'All builds'))}
-          ${card('Recent activity', 'clock', data.builds.length ? `<div class="rows">${data.builds.slice(0, 6).map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('layers', 'No builds yet', 'Your first local build will show up here.', `<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a>`), more(`#/p/${esc(name)}/builds`, 'View all'))}
-          ${card('Branches', 'branch', `<div class="rows">${data.branches.slice(0, 4).map((branch) => branchRow(name, branch, data)).join('') || empty('branch', 'No branches on GitHub', 'Push a branch to build it here.')}</div>`, more(`#/p/${esc(name)}/branches`, 'All branches'))}
+          ${card('Recent activity', 'clock', data.builds.length ? `<div class="rows">${data.builds.slice(0, 6).map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('layers', 'No builds yet', '', `<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a>`), more(`#/p/${esc(name)}/builds`, 'View all'))}
+          ${card('Branches', 'branch', `<div class="rows">${data.branches.slice(0, 4).map((branch) => branchRow(name, branch, data)).join('') || empty('branch', 'No branches')}</div>`, more(`#/p/${esc(name)}/branches`, 'All branches'))}
         </div>
         <div class="stack">
-          ${card('Health', 'chart', `<div class="card-body">${strip(data.builds)}<div class="strip-label"><span>Last ${Math.min(16, data.builds.length)} builds</span><span>newest on the right</span></div></div>
+          ${card('Health', 'chart', `<div class="card-body">${strip(data.builds)}<div class="strip-label"><span>Last ${Math.min(16, data.builds.length)}</span></div></div>
             <dl class="stats3" style="border-top:1px solid var(--line)"><div><dt>Passed</dt><dd>${data.stats.total ? `${Math.round((data.stats.passed / data.stats.total) * 100)}<small>%</small>` : '—'}</dd></div><div><dt>Typical</dt><dd>${data.stats.median ? `${Math.round(data.stats.median / 60000)}<small>min</small>` : '—'}</dd></div><div><dt>This week</dt><dd>${week}</dd></div></dl>`)}
           ${card('Signing', 'shield', kv([['Development profile', expiry(data.signing)], ['Devices', data.signing ? String(data.signing.devices) : '<span class="faint">—</span>'], ['App Store profile', expiry(data.storeSigning)]], 'list-kv'), more(`#/p/${esc(name)}/signing`, 'Details'))}
           ${card('Working copy', 'mac', kv([['Branch', esc(data.branch || 'detached')], ['Commit', `<span class="mono">${esc(data.commit)}</span>`], ['Changes', data.dirty ? `<span class="warn">${plural(data.dirty, 'file')}</span>` : 'Clean'], ['GitHub', data.behind ? `<span class="warn">${data.behind} behind</span>` : 'Up to date']], 'list-kv'))}
           ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<a class="row compact" href="#/p/${esc(name)}/automation">${icon(rule.on === 'pr' ? 'pr' : rule.on === 'nightly' ? 'clock' : 'branch', 'sm faint')}<span class="main"><span class="title">${ruleTitle(rule)}</span><span class="meta">${ruleDetail(rule)}</span></span><span class="led ${rule.error ? '' : 'idle'}"></span></a>`).join('')}</div>`
-            : '<div class="card-body muted">Off. Build on every push, for each pull request, or every night.</div>', more(`#/p/${esc(name)}/automation`, 'Manage'))}
+            : '<div class="card-body muted">Off</div>', more(`#/p/${esc(name)}/automation`, 'Manage'))}
           ${card('Releases', 'send', `<div id="releases">${skeleton(3)}</div>`, more(`#/p/${esc(name)}/submissions`, 'Submissions'))}
         </div>
       </div>`;
@@ -667,7 +657,7 @@ const PROJECT_SECTIONS = {
       const last = expo.submissions[0];
       return kv([
         ['Last submission', last ? `<span style="display:inline-flex;gap:6px;align-items:center">${expoIcon(last.status)}${ago(new Date(last.createdAt).getTime())}</span>` : '<span class="faint">None yet</span>'],
-        ['Update channels', String(expo.channels.length)],
+        ['Channels', String(expo.channels.length)],
         ['Expo project', expo.url ? `<a class="link" href="${esc(expo.url)}">Open on expo.dev</a>` : '—'],
       ], 'list-kv');
     });
@@ -678,11 +668,11 @@ const PROJECT_SECTIONS = {
     const views = { all: 'All', dev: 'Development', store: 'Production', failed: 'Failed' };
     const draw = () => {
       const shown = data.builds.filter(matches(prefs.projectFilter));
-      $('#plist').innerHTML = shown.length ? dayGroups(shown, (build) => buildRow(build, { project: false })) : `<div class="card">${empty('layers', 'Nothing here yet', 'Builds that match show up here.')}</div>`;
+      $('#plist').innerHTML = shown.length ? dayGroups(shown, (build) => buildRow(build, { project: false })) : `<div class="card">${empty('layers', 'Nothing here yet')}</div>`;
     };
     box.innerHTML = `<div id="plive"></div><div class="toolbar"><div class="seg" role="group" aria-label="Show">${Object.entries(views).map(([key, label]) => `<button data-view="${key}" class="${prefs.projectFilter === key ? 'on' : ''}">${label}<span class="count">${data.builds.filter(matches(key)).length}</span></button>`).join('')}</div></div>
       <div id="plist"></div>
-      <div class="section"><div class="section-head"><h2>Earlier EAS cloud builds</h2><span class="faint">From before macbuild</span></div><div class="card" id="cloud">${skeleton(2)}</div></div>`;
+      <div class="section"><div class="section-head"><h2>Cloud builds</h2></div><div class="card" id="cloud">${skeleton(2)}</div></div>`;
     updateLive($('#plive'), data.builds);
     draw();
     app.onclick = (event) => {
@@ -693,39 +683,38 @@ const PROJECT_SECTIONS = {
       draw();
     };
     withExpo(name, $('#cloud'), (expo) => (expo.cloud.length ? `<div class="rows">${expo.cloud.slice(0, 8).map((item) => `<div class="row compact">${expoIcon(item.status)}<span class="main"><span class="title">${esc(item.profile)}${item.platform === 'android' ? ' <span class="tag">Android</span>' : ''}</span><span class="meta">${esc(item.version ?? '')} (${esc(item.number ?? '')})</span></span><span class="end"><span class="when">${ago(new Date(item.createdAt).getTime())}</span></span></div>`).join('')}</div>`
-      : empty('cloudoff', 'No cloud builds', 'Every build of this app has run on a Mac.')));
+      : empty('cloudoff', 'No cloud builds')));
     if (data.builds.some(active)) every(3000, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(name)}`); data.builds = fresh.builds; updateLive($('#plive'), fresh.builds); draw(); });
   },
   async branches(data, box) {
-    box.innerHTML = `<div class="card rows">${data.branches.map((branch) => branchRow(data.name, branch, data, true)).join('') || empty('branch', 'No branches on GitHub', 'Push a branch, then come back.')}</div>
+    box.innerHTML = `<div class="card rows">${data.branches.map((branch) => branchRow(data.name, branch, data, true)).join('') || empty('branch', 'No branches')}</div>
       ${data.refreshing ? '<p class="hint">Checking GitHub for new branches…</p>' : ''}`;
   },
   async submissions(data, box) {
     const uploads = data.builds.filter(submits);
     box.innerHTML = `<div class="cols two">
       ${card('Store submissions', 'send', `<div id="subs">${skeleton(3)}</div>`)}
-      ${card('Uploads from this Mac', 'mac', uploads.length ? `<div class="rows">${uploads.slice(0, 10).map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('send', 'No store uploads yet', 'Start a production build with “Upload to TestFlight” or “Upload to Google Play” on.'))}
+      ${card('Uploads from this Mac', 'mac', uploads.length ? `<div class="rows">${uploads.slice(0, 10).map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('send', 'No uploads yet'))}
     </div>`;
     withExpo(data.name, $('#subs'), (expo) => (expo.submissions.length ? `<div class="rows">${expo.submissions.map((item) => `<div class="row">${expoIcon(item.status)}<span class="main"><span class="title">${esc(item.status.charAt(0) + item.status.slice(1).toLowerCase().replace(/_/g, ' '))}</span><span class="meta">${item.platform === 'android' ? 'Google Play' : `App Store Connect app <span class="mono">${esc(item.ascApp ?? '—')}</span>`}</span></span><span class="end"><span class="when">${ago(new Date(item.createdAt).getTime())}</span></span></div>`).join('')}</div>${expo.url ? `<div class="card-foot"><a class="link" href="${esc(expo.url)}/submissions">All submissions on expo.dev</a></div>` : ''}`
-      : empty('send', 'No submissions yet', 'Upload a production build to the store when it’s ready.')));
+      : empty('send', 'No submissions yet')));
   },
   async channels(data, box) {
-    box.innerHTML = `<div class="card" id="chan">${skeleton(3)}</div><p class="hint">Each build profile in eas.json names a channel; expo-updates sends a build made with it the updates on that channel’s branch.</p>`;
+    box.innerHTML = `<div class="card" id="chan">${skeleton(3)}</div>`;
     withExpo(data.name, $('#chan'), (expo) => (expo.channels.length ? `<div class="rows">${expo.channels.map((item) => `<div class="row"><span class="st">${icon('radio')}</span><span class="main"><span class="title">${esc(item.name)} ${item.paused ? '<span class="tag warn">paused</span>' : ''}</span><span class="meta">${item.branches.map((branch) => `<span>${icon('branch', 'xs')}${esc(branch.name)} · ${plural(branch.updates, 'update')}</span>`).join('<span class="sep"></span>') || 'No branch'}</span></span><span class="end hide-sm">${(() => { const used = data.profiles.filter((profile) => profile.channel === item.name).map((profile) => profile.name); return used.length ? `<span class="faint">${used.length === 1 ? 'profile' : 'profiles'}</span> ${esc(used.join(', '))}` : ''; })()}</span></div>`).join('')}</div>`
-      : empty('radio', 'No update channels', 'Builds with a channel in eas.json create one.')));
+      : empty('radio', 'No channels')));
   },
   async signing(data, box) {
     const profile = (signing, label) => {
-      if (!signing) return card(label, 'shield', empty('shield', 'No build yet', `Build a ${label.startsWith('App') ? 'production' : 'development'} profile to see its signing here.`));
+      if (!signing) return card(label, 'shield', empty('shield', 'No build yet'));
       const left = expiryOf(signing);
       return card(label, 'shield', `<div class="card-body"><div class="expiry"><span class="${left < 30 ? 'warn' : ''}"><b>${left}</b> days left</span><div class="bar ${left < 30 ? 'low' : ''}"><i style="width:${Math.max(2, Math.min(100, (left / 365) * 100))}%"></i></div></div></div>
         ${kv([['Profile', `<span class="mono">${esc(signing.profile)}</span>`], ['Team', esc(signing.team)], ['Expires', day(signing.expires)], ['Devices', signing.devices ? String(signing.devices) : 'Any (App Store)']], 'list-kv')}`);
     };
     box.innerHTML = `<div class="cols two">${profile(data.signing, 'Development profile')}${profile(data.storeSigning, 'App Store profile')}</div>
-      <div class="section"><div class="section-head"><h2>Registered devices</h2><span class="faint">Your Apple team, through Expo</span></div><div class="card" id="devices">${skeleton(3)}</div>
-      <p class="hint">EAS manages the certificates and profiles; macbuild reads them from the IPAs it builds. To add a device, run <span class="code">eas device:create</span>.</p></div>`;
+      <div class="section"><div class="section-head"><h2>Devices</h2></div><div class="card" id="devices">${skeleton(3)}</div></div>`;
     withExpo(data.name, $('#devices'), (expo) => (expo.devices.length ? `<div class="rows">${expo.devices.map((item) => `<div class="row compact"><span class="st">${icon(item.kind === 'IPAD' ? 'tablet' : 'phone')}</span><span class="main"><span class="title">${esc(item.name)}</span><span class="meta">${esc({ IPHONE: 'iPhone', IPAD: 'iPad' }[item.kind] ?? item.kind ?? '')}<span class="sep"></span><span class="mono">…${esc(item.udid ?? '')}</span></span></span></div>`).join('')}</div>`
-      : empty('phone', 'No devices listed', 'To list your team’s devices here, add your Apple Team ID as <code>"appleTeam"</code> in <code>~/.config/macbuild/ui.json</code>.')));
+      : empty('phone', 'No devices')));
   },
   async environment(data, box) {
     box.innerHTML = `<div class="stack" id="env">${skeleton(4)}</div>`;
@@ -736,15 +725,10 @@ const PROJECT_SECTIONS = {
   async automation(data, box) {
     const name = data.name;
     const branches = data.branches.map((branch) => branch.name);
-    const NOTES = {
-      push: 'Builds the branch each time it’s pushed, from the next push on. A newer push replaces a build that hasn’t started.',
-      pr: 'Builds each pull request from this repository when it’s next pushed to. Pull requests from forks are never built: their code would run on this Mac.',
-      nightly: 'Builds the branch once a day at this time on the Mac’s clock, and only when it has new commits.',
-    };
     const ruleIcon = (rule) => icon(rule.on === 'pr' ? 'pr' : rule.on === 'nightly' ? 'clock' : 'branch', 'sm faint');
     box.innerHTML = `<div class="cols main-side"><div class="stack">
         ${card('Rules', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<label class="toggle"><span><b>${ruleIcon(rule)} ${ruleTitle(rule)}</b><small>${ruleDetail(rule)}${!rule.error && rule.sha ? ` · last built <span class="mono">${esc(rule.sha.slice(0, 7))}</span>` : ''}</small></span><input class="switch" type="checkbox" checked data-rule-on="${esc(rule.on ?? 'push')}" data-rule-branch="${esc(rule.branch ?? '')}" aria-label="${esc(ruleTitle(rule))}"></label>`).join('')}</div>`
-          : empty('bolt', 'No rules yet', 'Add one to build without starting each build yourself.'))}
+          : empty('bolt', 'No rules yet'))}
       </div><div class="stack">
         ${card('Add a rule', 'plus', `<form class="card-body form" id="rule">
           <label class="field"><span>When</span><select class="select" name="when">${Object.entries(RULE_KINDS).map(([key, label]) => `<option value="${key}">${label}</option>`).join('')}</select></label>
@@ -752,9 +736,8 @@ const PROJECT_SECTIONS = {
           <label class="field" id="rule-at" hidden><span>Time</span><input class="input" type="time" name="at" value="02:00"></label>
           <label class="field"><span>Platform</span><select class="select" name="platform"><option value="ios">iOS</option><option value="android">Android</option></select></label>
           <label class="field"><span>Profile</span><select class="select" name="profile">${data.profiles.map((item) => `<option value="${esc(item.name)}" ${item.name === 'development' ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
-          <label class="toggle" style="padding:0"><span><b id="rule-store">Upload to TestFlight</b><small>Store profiles only</small></span><input class="switch" type="checkbox" name="submit"></label>
-          <label class="toggle" style="padding:0"><span><b>Reuse unchanged builds</b><small>Skip the build when the native code hasn’t changed. For development builds.</small></span><input class="switch" type="checkbox" name="skip"></label>
-          <p class="hint" id="rule-note">${NOTES.push}</p>
+          <label class="toggle" style="padding:0"><span><b id="rule-store">Upload to TestFlight</b></span><input class="switch" type="checkbox" name="submit"></label>
+          <label class="toggle" style="padding:0"><span><b>Reuse if unchanged</b></span><input class="switch" type="checkbox" name="skip"></label>
           <button class="btn primary">${icon('bolt')}Add rule</button><p class="hint bad" id="rule-error"></p></form>`)}
       </div></div>`;
     const form = $('#rule');
@@ -770,7 +753,6 @@ const PROJECT_SECTIONS = {
       $('#rule-store').textContent = `Upload to ${storeName(form.platform.value)}`;
       $('#rule-branch').hidden = when === 'pr';
       $('#rule-at').hidden = when !== 'nightly';
-      $('#rule-note').textContent = NOTES[when];
     };
     form.onchange = () => { when = form.when.value; sync(); };
     form.profile.value = data.profiles.find((item) => item.developmentClient)?.name ?? form.profile.value;
@@ -823,16 +805,16 @@ async function newBuildPage({ name, branch }) {
     return kind.simulator ? 'Simulator' : item.distribution === 'store' ? 'App Store' : 'Internal';
   };
   app.innerHTML = `<nav class="crumbs"><a href="#/projects">Projects</a><span class="slash">/</span><a href="#/p/${esc(name)}">${avatar(name, 'xs')}${esc(name)}</a><span class="slash">/</span><span>New build</span></nav>
-    ${header('New build', `Build ${esc(name)} on ${esc(machineName())} with <span class="mono">eas build --local</span>.`)}
+    ${header('New build')}
     <div class="cols main-side"><form class="form" id="nb" onsubmit="return false">
       ${card('Source', 'branch', `<div class="card-body">
-        <div class="seg" role="group" aria-label="Source"><button type="button" data-source="branch">GitHub branch</button><button type="button" data-source="working">This Mac’s working copy</button></div>
+        <div class="seg" role="group" aria-label="Source"><button type="button" data-source="branch">GitHub branch</button><button type="button" data-source="working">Working copy</button></div>
         <div id="src"></div></div>`)}
       ${card('Platform and profile', 'layers', `<div class="card-body">
         <div class="seg" role="group" aria-label="Platform"><button type="button" data-platform="ios">iOS</button><button type="button" data-platform="android">Android</button></div>
         <div class="choices" id="profiles"></div></div>`)}
       ${card('After the build', 'send', `<div class="rows"><label class="toggle"><span><b id="submit-label">Upload to TestFlight</b><small id="tf-note"></small></span><input class="switch" type="checkbox" id="submit"></label>
-        <label class="toggle"><span><b>Reuse it if the native code hasn’t changed</b><small id="skip-note"></small></span><input class="switch" type="checkbox" id="skip"></label>
+        <label class="toggle"><span><b>Reuse if unchanged</b><small id="skip-note"></small></span><input class="switch" type="checkbox" id="skip"></label>
         <label class="toggle"><span><b>Build on every push</b><small id="auto-note"></small></span><input class="switch" type="checkbox" id="auto"></label></div>`)}
     </form>
     <aside class="stack"><section class="card" id="sum"></section></aside></div>`;
@@ -840,8 +822,8 @@ async function newBuildPage({ name, branch }) {
     document.querySelectorAll('[data-source]').forEach((button) => button.classList.toggle('on', button.dataset.source === form.source));
     $('#src').innerHTML = form.source === 'branch'
       ? `<div class="form"><label class="field"><span>Branch</span><select class="select" id="branch">${data.branches.map((item) => `<option value="${esc(item.name)}" ${item.name === form.branch ? 'selected' : ''}>${esc(item.name)}${item.pr ? ` · #${esc(item.pr.number)}` : ''}</option>`).join('')}</select></label>
-        <label class="field"><span>Commit</span><select class="select" id="commit">${commits.map((item, index) => `<option value="${index ? esc(item.hash) : ''}" ${(index ? item.hash : '') === form.commit ? 'selected' : ''}>${esc(item.short)} · ${esc(item.subject.slice(0, 60))}${index ? '' : ' (latest)'}</option>`).join('') || '<option>Loading…</option>'}</select><small>A clean checkout of the pushed commit: nothing uncommitted on this Mac goes in.</small></label></div>`
-      : `<p class="hint">Builds the project folder on this Mac as it is${data.dirty ? `, <span class="warn">including ${plural(data.dirty, 'uncommitted change')}</span>` : ''}. For the store, prefer a pushed branch.</p>`;
+        <label class="field"><span>Commit</span><select class="select" id="commit">${commits.map((item, index) => `<option value="${index ? esc(item.hash) : ''}" ${(index ? item.hash : '') === form.commit ? 'selected' : ''}>${esc(item.short)} · ${esc(item.subject.slice(0, 60))}${index ? '' : ' (latest)'}</option>`).join('') || '<option>Loading…</option>'}</select></label></div>`
+      : data.dirty ? `<p class="hint warn">${plural(data.dirty, 'uncommitted change')}</p>` : '';
   };
   const drawProfiles = () => {
     document.querySelectorAll('[data-platform]').forEach((button) => button.classList.toggle('on', button.dataset.platform === form.platform));
@@ -855,16 +837,14 @@ async function newBuildPage({ name, branch }) {
     $('#submit').disabled = !isStore();
     $('#submit').checked = form.submit;
     $('#submit-label').textContent = `Upload to ${storeName(form.platform)}`;
-    $('#tf-note').textContent = isStore() ? `Expo uploads the build to ${form.platform === 'android' ? 'Google Play' : 'App Store Connect'} when it’s done.` : 'Pick a store profile to upload.';
+    $('#tf-note').textContent = isStore() ? '' : 'Store profiles only';
     $('#skip').disabled = form.submit;
     $('#skip').checked = skip();
-    $('#skip-note').textContent = form.submit ? 'A store upload always needs a new build.'
-      : devLike() ? 'A development build loads JavaScript from Metro, so it only needs rebuilding when native code changes. macbuild compares native fingerprints.'
-        : 'This profile bundles your JavaScript into the app, so a reused build won’t have JavaScript changes.';
+    $('#skip-note').textContent = form.submit ? 'Store uploads always build' : '';
     const rule = pushRule();
     $('#auto').disabled = form.source !== 'branch';
     $('#auto').checked = Boolean(rule) && form.source === 'branch';
-    $('#auto-note').innerHTML = form.source !== 'branch' ? 'Pushes only apply to GitHub branches.' : rule ? `On for ${esc(form.branch)}: ${ruleDetail(rule)}.` : `Build ${esc(form.branch)} with these settings each time it’s pushed.`;
+    $('#auto-note').textContent = form.source !== 'branch' ? 'Pick a GitHub branch' : '';
     $('#sum').innerHTML = `<div class="card-head"><h2>${avatar(name, 'sm')}${esc(name)}</h2><span class="faint">Summary</span></div>
       ${kv([
         ['Source', form.source === 'branch' ? esc(form.branch) : 'Working copy'],
@@ -961,22 +941,22 @@ async function insightsPage() {
     return { label: `${short(build)} · ${day(build.createdAt)}${Math.abs(change) >= 52429 ? ` · ${change > 0 ? '+' : '−'}${mb(Math.abs(change))}` : ''}`, tick: day(build.createdAt), tip: mb(build.ipaBytes), parts: [{ value: build.ipaBytes / 1048576 }] };
   });
   const sizeTitle = sizeSeries.length ? `${sizeSeries[0].platform === 'android' ? 'Android' : 'iOS'} · ${sizeSeries[0].profile}` : '';
-  const kpi = (ic, label, value, note) => `<div class="card kpi"><div class="k">${icon(ic)}${label}</div><div class="v">${value}</div><div class="n">${note}</div></div>`;
-  app.innerHTML = `${mobileTop()}${header('Insights', `How builds have gone on ${esc(machineName())}.`)}
-    <div class="toolbar"><div class="seg" role="group" aria-label="Projects">${['all', ...names].map((name) => `<button data-scope="${esc(name)}" class="${prefs.scope === name ? 'on' : ''}">${name === 'all' ? 'All projects' : esc(name)}</button>`).join('')}</div></div>
+  const kpi = (ic, label, value, note = '') => `<div class="card kpi"><div class="k">${icon(ic)}${label}</div><div class="v">${value}</div>${note ? `<div class="n">${note}</div>` : ''}</div>`;
+  app.innerHTML = `${mobileTop()}${header('Insights')}
+    <div class="toolbar"><div class="seg" role="group" aria-label="Projects">${['all', ...names].map((name) => `<button data-scope="${esc(name)}" class="${prefs.scope === name ? 'on' : ''}">${name === 'all' ? 'All' : esc(name)}</button>`).join('')}</div></div>
     <div class="kpis">
-      ${kpi('layers', 'Builds this week', week.length, `<span class="delta ${change > 0 ? 'up' : change < 0 ? 'down' : ''}">${change > 0 ? '+' : ''}${change}</span> on the week before`)}
-      ${kpi('check', 'Success rate', finished.length ? `${Math.round((passed.length / finished.length) * 100)}%` : '—', `${passed.length} of ${finished.length} finished builds`)}
-      ${kpi('timer', 'Typical build', times.length ? span(median(times)) : '—', 'Median of successful builds')}
-      ${kpi('mac', 'Mac time this week', busy ? span(busy) : '—', `Across ${plural(week.length, 'build')}`)}
+      ${kpi('layers', 'This week', week.length, `<span class="delta ${change > 0 ? 'up' : change < 0 ? 'down' : ''}">${change > 0 ? '+' : ''}${change}</span>`)}
+      ${kpi('check', 'Passed', finished.length ? `${Math.round((passed.length / finished.length) * 100)}%` : '—')}
+      ${kpi('timer', 'Typical', times.length ? span(median(times)) : '—')}
+      ${kpi('mac', 'Mac time', busy ? span(busy) : '—')}
     </div>
     <div class="cols two section">
       ${card('Builds per day', 'chart', '<div class="card-body chart" data-chart="0"></div>', '<div class="legend"><span><i></i>Finished</span><span><i class="failed"></i>Failed</span></div>')}
       ${card('Build time', 'timer', recent.length ? '<div class="card-body chart" data-chart="1"></div>' : empty('timer', 'No finished builds yet'), '<div class="legend"><span><i></i>Last 20</span><span><i class="median"></i>Median</span></div>')}
     </div>
     <div class="cols two section">
-      ${card('Where the time goes', 'clock', phases.length ? `<div class="card-body hbars">${phases.map((item) => `<div class="hbar"><span>${esc(phaseName(item.key))}</span><div class="track"><i style="width:${((item.ms / longest) * 100).toFixed(1)}%"></i></div><em>${span(item.ms)}</em></div>`).join('')}</div><div class="card-foot">Median time in each phase of a successful build.</div>` : empty('clock', 'No phase timings yet'))}
-      ${card('App size', 'download', sizes.length > 1 ? '<div class="card-body chart" data-chart="2"></div>' : `<div class="card-body muted">${prefs.scope === 'all' ? 'Pick a project above to see how its app size changes from build to build.' : 'Two finished builds of the same profile are needed to compare sizes.'}</div>`, sizeTitle ? `<span class="faint">${esc(sizeTitle)}</span>` : '')}
+      ${card('Phases', 'clock', phases.length ? `<div class="card-body hbars">${phases.map((item) => `<div class="hbar"><span>${esc(phaseName(item.key))}</span><div class="track"><i style="width:${((item.ms / longest) * 100).toFixed(1)}%"></i></div><em>${span(item.ms)}</em></div>`).join('')}</div>` : empty('clock', 'No timings yet'))}
+      ${card('App size', 'download', sizes.length > 1 ? '<div class="card-body chart" data-chart="2"></div>' : empty('download', prefs.scope === 'all' ? 'Pick a project' : 'Need two builds'), sizeTitle ? `<span class="faint">${esc(sizeTitle)}</span>` : '')}
     </div>
     <div class="section">
       ${card('By project', 'apps', `<div class="table-wrap"><table class="table"><thead><tr><th>Project</th><th class="r">This week</th><th class="r">Passed</th><th class="r">Typical</th><th class="r">App size</th><th class="r">Last build</th></tr></thead><tbody>${byProject.map((row) => `<tr><td><a class="who" href="#/p/${esc(row.name)}">${avatar(row.name, 'sm')}${esc(row.name)}</a></td><td class="r">${row.week}</td><td class="r">${row.rate === null ? '—' : `${row.rate}%`}</td><td class="r">${row.typical ? span(row.typical) : '—'}</td><td class="r">${row.size ? mb(row.size) : '—'}</td><td class="r">${row.last ? `<span class="last">${statusIcon(row.last.status)}${ago(row.last.createdAt)}</span>` : '—'}</td></tr>`).join('')}</tbody></table></div>`)}
@@ -1006,36 +986,36 @@ async function settingsPage() {
   const load = Math.min(1, data.load / Math.max(1, data.cores));
   const hours = Math.floor(data.uptime / 3600);
   const meter = (label, value, fraction, low = false) => `<div><div class="meter-label"><span>${label}</span><span>${value}</span></div><div class="bar ${low ? 'low' : ''}"><i style="width:${(fraction * 100).toFixed(1)}%"></i></div></div>`;
-  app.innerHTML = `${mobileTop()}${header('Settings', 'This Mac, notifications, integrations and automatic builds.')}
+  app.innerHTML = `${mobileTop()}${header('Settings')}
     <div class="settings"><div class="stack">
       <section class="card"><div class="hero-mac"><span class="mac">${icon('mac')}</span><div><b>${esc(machine.name || 'This Mac')}</b><small>${esc([machine.chip, machine.memory && `${Math.round(machine.memory / 1073741824)} GB`, machine.macos && `macOS ${machine.macos}`].filter(Boolean).join(' · '))}</small></div>
         <span class="pill" style="margin-left:auto">${data.current ? '<span class="led busy"></span>Building' : '<span class="led idle"></span>Idle'}</span></div>
         <div class="meters">${meter('Disk', `${gb(data.diskFree)} free of ${gb(data.diskTotal)}`, used, used > 0.9)}${meter('Load', `${data.load.toFixed(1)} on ${data.cores} cores`, load)}${data.battery ? meter('Battery', `${data.battery.percent}% · ${esc(data.battery.state)}`, data.battery.percent / 100, data.battery.percent < 20) : ''}</div>
         ${kv([['Up for', hours > 47 ? `${Math.floor(hours / 24)} days` : plural(hours, 'hour')], ['Queue', data.current ? `Building, ${data.queued} waiting` : `${data.queued} waiting`]], 'list-kv')}</section>
-      ${card('Disk cleanup', 'broom', `<div id="disk">${skeleton(5)}</div>`, '<button class="btn sm ghost" id="disk-again">Measure again</button>')}
-      ${card('Notifications', 'bell', `<label class="toggle"><span><b>When a build finishes</b><small id="push-note">${canPush ? (enabled ? 'On for this device.' : 'A notification on this device when each build finishes or fails.') : 'Add macbuild to your Home Screen, then open it from there to turn this on.'}</small></span><input class="switch" type="checkbox" id="push" ${enabled ? 'checked' : ''} ${canPush ? '' : 'disabled'}></label>
+      ${card('Disk', 'broom', `<div id="disk">${skeleton(5)}</div>`, '<button class="btn sm ghost" id="disk-again">Measure again</button>')}
+      ${card('Notifications', 'bell', `<label class="toggle"><span><b>When a build finishes</b><small id="push-note">${canPush ? (enabled ? 'On' : '') : 'Add to Home Screen first'}</small></span><input class="switch" type="checkbox" id="push" ${enabled ? 'checked' : ''} ${canPush ? '' : 'disabled'}></label>
         ${enabled ? '<div class="card-foot"><button class="btn sm" id="push-test">Send a test</button></div>' : ''}`)}
     </div><div class="stack">
       ${card('Integrations', 'link', `<div class="rows">
-        <label class="toggle"><span><b>Build status on GitHub</b><small>${tools.gh ? 'Each build of a pushed commit shows up as a check on its commit and pull request, linked to its page here.' : 'Needs the GitHub CLI signed in on this Mac: run <span class="code">gh auth login</span>.'}</small></span><input class="switch" type="checkbox" id="gh-status" ${settings.githubStatus ? 'checked' : ''} ${tools.gh || settings.githubStatus ? '' : 'disabled'}></label>
-        <form class="setting" id="hook-form"><div><b>Slack or Discord</b><small>${settings.webhook ? `A message goes to ${esc(settings.webhook)} when each build ends.` : 'Paste an incoming webhook URL to get a message when each build ends.'}</small></div>
-          <div class="inline"><input class="input" id="hook" type="url" placeholder="${settings.webhook ? 'Paste a new URL to replace it' : 'https://hooks.slack.com/services/…'}" autocomplete="off" aria-label="Webhook URL"><button class="btn sm">Save</button>${settings.webhook ? '<button type="button" class="btn sm" id="hook-test">Send a test</button><button type="button" class="btn sm ghost" id="hook-remove">Remove</button>' : ''}</div>
+        <label class="toggle"><span><b>GitHub checks</b><small>${tools.gh ? '' : 'Run gh auth login'}</small></span><input class="switch" type="checkbox" id="gh-status" ${settings.githubStatus ? 'checked' : ''} ${tools.gh || settings.githubStatus ? '' : 'disabled'}></label>
+        <form class="setting" id="hook-form"><div><b>Slack or Discord</b></div>
+          <div class="inline"><input class="input" id="hook" type="url" placeholder="${settings.webhook ? 'Replace webhook URL' : 'Webhook URL'}" autocomplete="off" aria-label="Webhook URL"><button class="btn sm">Save</button>${settings.webhook ? '<button type="button" class="btn sm" id="hook-test">Test</button><button type="button" class="btn sm ghost" id="hook-remove">Remove</button>' : ''}</div>
           <p class="hint" id="hook-note"></p></form>
-        <form class="setting" id="team-form"><div><b>Apple Team ID</b><small>Lists your team’s registered devices on each project’s Signing page. It’s on developer.apple.com under Membership.</small></div>
+        <form class="setting" id="team-form"><div><b>Apple Team ID</b></div>
           <div class="inline"><input class="input mono" id="team" placeholder="ABCDE12345" value="${esc(settings.appleTeam ?? '')}" maxlength="10" autocomplete="off" aria-label="Apple Team ID"><button class="btn sm">Save</button></div><p class="hint" id="team-note"></p></form>
       </div>`)}
       ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<div class="row">${avatar(rule.project, 'sm')}<span class="main"><span class="title">${esc(rule.project)} <span class="faint">/</span> ${ruleTitle(rule)}</span><span class="meta">${ruleDetail(rule)}</span></span>
           ${rule.missing ? `<button class="btn sm remove-rule" data-project="${esc(rule.project)}" data-on="${esc(rule.on ?? 'push')}" data-branch="${esc(rule.branch ?? '')}">Remove</button>` : `<a class="btn sm ghost" href="#/p/${esc(rule.project)}/automation">Manage</a>`}</div>`).join('')}</div>`
-        : empty('bolt', 'None yet', 'Add rules from a project’s Build automation page.'))}
-      ${card('Storage', 'disk', kv([['Builds kept', `${data.kept?.builds ?? '—'} <span class="faint">of ${data.kept?.maxBuilds ?? 200}</span>`], ['Build files kept', `${data.kept?.ipas ?? '—'} <span class="faint">of ${data.kept?.maxIpas ?? 10}</span>`], ['Space used by build files', mb(data.ipaBytes)]], 'list-kv'), '<span class="faint">Oldest go first</span>')}
+        : empty('bolt', 'None yet'))}
+      ${card('Storage', 'disk', kv([['Builds kept', `${data.kept?.builds ?? '—'} <span class="faint">of ${data.kept?.maxBuilds ?? 200}</span>`], ['Build files kept', `${data.kept?.ipas ?? '—'} <span class="faint">of ${data.kept?.maxIpas ?? 10}</span>`], ['Space used', mb(data.ipaBytes)]], 'list-kv'))}
       ${card('Tools', 'gear', kv([['Xcode', esc(tools.xcode || '—')], ['EAS CLI', esc(tools.eas || '—')], ['Node.js', esc(tools.node)], ['GitHub CLI', tools.gh ? 'Signed in' : '<span class="faint">Not signed in</span>'], ['Android SDK', tools.android ? 'Found' : '<span class="faint">Not installed</span>']], 'list-kv'))}
-      ${card('About', 'cube', `<div class="card-body muted">macbuild runs <span class="mono">eas build --local</span> on this Mac, so builds cost nothing and never wait in someone else’s queue. Expo still holds your credentials and project settings. <a class="link" href="https://github.com/fav-devs/macbuild">github.com/fav-devs/macbuild</a></div>`)}
+      ${card('About', 'cube', `<div class="card-body muted"><a class="link" href="https://github.com/fav-devs/macbuild">github.com/fav-devs/macbuild</a></div>`)}
     </div></div>`;
   const drawDisk = (disk) => {
     const clearable = disk.items.filter((item) => item.cleanable && item.bytes).reduce((sum, item) => sum + item.bytes, 0);
-    $('#disk').innerHTML = `<div class="rows">${disk.items.map((item) => `<div class="row"><span class="main"><span class="title">${esc(item.label)}</span><span class="meta wrap">${esc(item.note)}</span></span>
+    $('#disk').innerHTML = `<div class="rows">${disk.items.map((item) => `<div class="row"><span class="main"><span class="title">${esc(item.label)}</span></span>
       <span class="end"><span class="num">${item.bytes === null ? '—' : item.bytes ? (item.bytes >= 1e9 ? gb(item.bytes) : mb(item.bytes)) : 'Empty'}</span>${item.cleanable ? `<button class="btn sm" data-clean="${esc(item.key)}" data-label="${esc(item.label)}" ${item.bytes || item.key === 'simulators' ? '' : 'disabled'}>Clear</button>` : '<span class="btn sm ghost" style="visibility:hidden">Clear</span>'}</span></div>`).join('')}</div>
-      <div class="card-foot">${clearable ? `About ${clearable >= 1e9 ? gb(clearable) : mb(clearable)} can be cleared. ` : ''}Clearing is refused while a build runs.</div>`;
+      ${clearable ? `<div class="card-foot">${clearable >= 1e9 ? gb(clearable) : mb(clearable)} can be cleared</div>` : ''}`;
   };
   const loadDisk = async (fresh) => { $('#disk').innerHTML = skeleton(5); drawDisk(await get(`/api/disk${fresh ? '?fresh' : ''}`)); };
   loadDisk(false).catch(() => { $('#disk').innerHTML = empty('disk', 'Couldn’t measure the disk'); });
@@ -1074,11 +1054,11 @@ async function settingsPage() {
 }
 
 function offline() {
-  app.innerHTML = `${mobileTop()}<div class="card" style="margin-top:12vh">${empty('cloudoff', 'Can’t reach your Mac', 'Check that it’s awake and that Tailscale is on. Trying again every few seconds.')}</div>`;
+  app.innerHTML = `${mobileTop()}<div class="card" style="margin-top:12vh">${empty('cloudoff', 'Can’t reach your Mac')}</div>`;
   every(5000, async () => { const response = await fetch('/api/projects', { cache: 'no-store' }); if (!response.ok) throw new Error('offline'); route(); return 'stop'; });
 }
 function notFound(what) {
-  app.innerHTML = `<div class="card" style="margin-top:12vh">${empty('search', `No ${what} here`, 'It may have been removed, or the link is from another Mac.', `<a class="btn" href="#/">${icon('left')}Back to builds</a>`)}</div>`;
+  app.innerHTML = `<div class="card" style="margin-top:12vh">${empty('search', `No ${what} here`, '', `<a class="btn" href="#/">${icon('left')}Back to builds</a>`)}</div>`;
 }
 
 // Installing as an app, and notifications
@@ -1088,7 +1068,7 @@ function installHint() {
   let hidden = false;
   try { hidden = Boolean(localStorage.hideInstall); } catch {}
   if (!box || standalone() || hidden || !/iPhone|iPad/.test(navigator.userAgent)) return;
-  box.innerHTML = `<div class="banner">${icon('phone')}<span>Add macbuild to your Home Screen: tap Share, then Add to Home Screen.</span><button class="btn ghost sm" style="margin-left:auto" data-hide-install aria-label="Dismiss">${icon('x')}</button></div>`;
+  box.innerHTML = `<div class="banner">${icon('phone')}<span>Add to Home Screen</span><button class="btn ghost sm" style="margin-left:auto" data-hide-install aria-label="Dismiss">${icon('x')}</button></div>`;
   box.querySelector('[data-hide-install]').onclick = () => { try { localStorage.hideInstall = '1'; } catch {} box.innerHTML = ''; };
 }
 const urlKey = (key) => Uint8Array.from(atob((key + '='.repeat((4 - (key.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
@@ -1102,13 +1082,13 @@ async function togglePush(on, note) {
     const existing = await registration.pushManager.getSubscription();
     if (!on) {
       if (existing) { await post('/api/push', { remove: existing.endpoint }); await existing.unsubscribe(); }
-      note.textContent = 'Off.'; return;
+      note.textContent = 'Off'; return;
     }
-    if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications are blocked for this app.');
+    if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications are blocked.');
     const { key } = await get('/api/push/key');
     const subscription = existing ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlKey(key) });
     await post('/api/push', { subscription: subscription.toJSON() });
-    note.textContent = 'On. You’ll hear when each build finishes.';
+    note.textContent = 'On';
   } catch (error) {
     note.textContent = error.message; $('#push').checked = false;
   }

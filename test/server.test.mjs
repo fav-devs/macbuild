@@ -120,6 +120,15 @@ head -c 2048 /dev/zero > "$out"
   mkdirSync(join(home, 'Library/Caches/CocoaPods'), { recursive: true });
   writeFileSync(join(home, '.cache/macbuild/leftover'), 'x'.repeat(8192));
   writeFileSync(join(home, 'Library/Caches/CocoaPods/pod'), 'x'.repeat(8192));
+  // A previous UI process died after eas had already written the IPA.
+  const recovered = '20260101010101-my-app';
+  mkdirSync(join(dir, 'builds', recovered), { recursive: true });
+  writeFileSync(join(dir, 'builds', recovered, 'meta.json'), JSON.stringify({
+    id: recovered, project: 'my_app', platform: 'ios', action: 'build', profile: 'development', artifact: 'app.ipa',
+    status: 'failed', reason: 'The UI restarted during this build', createdAt: Date.now() - 120000, startedAt: Date.now() - 120000, finishedAt: Date.now() - 1000,
+  }));
+  writeFileSync(join(dir, 'builds', recovered, 'build.log'), '[RUN_FASTLANE] done\r\nBuild successful\r\n');
+  writeFileSync(join(dir, 'builds', recovered, 'app.ipa'), Buffer.alloc(2048));
   server = spawn(process.execPath, ['--import', join(ROOT, 'test/fast-timers.mjs'), join(ROOT, 'ui/server.mjs')], {
     stdio: process.env.SERVER_LOG ? 'inherit' : 'ignore',
     env: {
@@ -131,6 +140,15 @@ head -c 2048 /dev/zero > "$out"
   await until(async () => (await request('/api/builds')).status === 200);
 });
 after(() => { server?.kill(); hookServer?.close(); });
+
+test('a restart adopts a detached build that already succeeded', async () => {
+  const finished = await until(async () => {
+    const { json } = await request('/api/builds/20260101010101-my-app');
+    return json?.status === 'success' && json;
+  });
+  assert.equal(finished.ipaBytes, 2048);
+  assert.equal(finished.reason, undefined);
+});
 
 test('a project named with an underscore builds', async () => {
   const created = await request('/api/builds', { method: 'POST', body: { project: 'my_app', profile: 'development' } });

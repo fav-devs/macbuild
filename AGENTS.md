@@ -35,7 +35,8 @@ Rules:
 - For TestFlight or Google Play, use `--ref` with a pushed branch, so uncommitted or out-of-date local code doesn't ship.
 - Android needs Android Studio's SDK and Java 17. `macbuild doctor` shows whether they're found.
 - Don't run `eas build` without `--local`. Cloud builds cost money, and using macbuild means the user chose local.
-- Each build logs to `~/Library/Logs/<name>-<platform>-build-<profile>.log`. Read it when a build fails. A failed build also prints a `likely cause` and its fix when it recognises the error.
+- Dashboard jobs write `~/.local/share/macbuild/builds/<id>/build.log` and `meta.json`. CLI jobs also write `~/Library/Logs/<name>-<platform>-build-<profile>.log`. Read those when a build fails. A failed build also prints a `likely cause` and its fix when it recognises the error.
+- Pull history without opening the dashboard: `macbuild builds`, `macbuild log` (latest, or an id / project name), `macbuild show` (JSON). `macbuild builds --json` dumps every job.
 - Report what happened, with the build's path or the error. A finished `--submit` run still has to be processed by Apple or Google.
 
 To make a project's agents build locally, add this to its `AGENTS.md`:
@@ -44,6 +45,7 @@ To make a project's agents build locally, add this to its `AGENTS.md`:
 ## Builds are local only
 
 Never run an EAS cloud build. Build on the Mac with `macbuild <project>`.
+Inspect jobs with `macbuild builds`, `macbuild log` and `macbuild show`.
 ```
 
 ## Work on macbuild
@@ -51,6 +53,6 @@ Never run an EAS cloud build. Build on the Mac with `macbuild <project>`.
 - `bin/macbuild`: the CLI. Must run on macOS's bash 3.2.
 - `lib/eas_pty.py`: runs `eas` in a terminal so prompts can be answered. New prompts go in `SPECS` in `bin/macbuild`.
 - `lib/profile.mjs` reads `eas.json` profiles (simulator, APK or AAB), `lib/fingerprint.mjs` computes the native fingerprint with the project's own `@expo/fingerprint`, and `lib/diagnose.mjs` lists known failures with their fixes. Add a newly seen failure there, most specific first.
-- `ui/server.mjs` and `ui/public/`: the dashboard. Keep it on `127.0.0.1`; POST requests need the `x-macbuild` header, and every request's Host must be loopback, the tailnet name or one in `MACBUILD_UI_HOSTS`.
+- `ui/server.mjs` and `ui/public/`: the dashboard. Keep it on `127.0.0.1`; POST requests need the `x-macbuild` header, and every request's Host must be loopback, the tailnet name or one in `MACBUILD_UI_HOSTS`. `ui/public/` is served from disk, so copy and CSS changes are live without a restart. Restart `local.macbuild.ui` only when `server.mjs` changed, and only if nothing is building: a restart used to mark the running job failed even though `eas` keeps going.
 - `node ui/demo/demo.mjs` serves the dashboard at http://localhost:4181 with sample projects, a build history and a build running, using stand-ins for eas, gh and git's network calls. Use it to work on the UI and to retake the README screenshots in `docs/`. It never touches real projects.
 - Tests: `npm ci --prefix ui`, then `node --test test/*.test.mjs`. They run `bin/macbuild` with a fake `eas` and the dashboard against throwaway projects, on Linux or macOS. CI also runs `shellcheck -S warning` on the shell scripts.
