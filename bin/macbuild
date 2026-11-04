@@ -381,6 +381,20 @@ while IFS='=' read -r key value; do
 done < <(node "$ROOT/lib/profile.mjs" "$APP_DIR/eas.json" "$PROFILE" "$PLATFORM" 2>/dev/null)
 [ "$MISSING" = 0 ] || { echo "no build profile \"$PROFILE\" in $APP_DIR/eas.json"; exit 1; }
 if [ -z "$EXT" ]; then EXT=ipa; [ "$PLATFORM" = android ] && EXT=apk; fi
+# eas.json profile env (merged with extends). eas-cli's local fingerprint and the
+# in-build one both evaluate app.config.js, so APP_VARIANT and friends must be set here.
+export EAS_BUILD_PROFILE="$PROFILE"
+eval "$(node "$ROOT/lib/profile.mjs" --export-env "$APP_DIR/eas.json" "$PROFILE" 2>/dev/null | python3 -c '
+import json, sys, shlex
+raw = sys.stdin.read().strip()
+env = json.loads(raw) if raw else {}
+if not isinstance(env, dict):
+    raise SystemExit(0)
+for key, value in env.items():
+    if not isinstance(key, str) or not key.isidentifier():
+        continue
+    print("export %s=%s" % (key, shlex.quote("" if value is None else str(value))))
+')"
 # Settings used after the build are checked first, so a missing one doesn't waste the build.
 if [ "$INSTALL" = 1 ]; then
   if [ "$PLATFORM" = android ]; then

@@ -14,7 +14,7 @@ const EAS_JSON = JSON.stringify({ build: { development: { developmentClient: tru
 const MACBUILD = join(ROOT, 'bin/macbuild');
 // Asks one signing question the way eas does, colours included, then writes the IPA where --output says.
 const FAKE_EAS = `#!/bin/bash
-echo "$* cwd=$(pwd) env=$([ -f .env ] && echo yes || echo no)" >> "$HOME/eas-calls"
+echo "$* cwd=$(pwd) env=$([ -f .env ] && echo yes || echo no) APP_VARIANT=\${APP_VARIANT:-} EAS_BUILD_PROFILE=\${EAS_BUILD_PROFILE:-}" >> "$HOME/eas-calls"
 out=""; while [ $# -gt 0 ]; do [ "$1" = --output ] && out=$2; shift; done
 printf '\\033[32m?\\033[39m \\033[1mReuse this distribution certificate?\\033[22m (Y/n) '
 read -r reply
@@ -46,6 +46,18 @@ function sandbox() {
   const calls = () => (existsSync(join(home, 'eas-calls')) ? readFileSync(join(home, 'eas-calls'), 'utf8') : '');
   return { home, app, run, start, list, calls, cache: join(home, '.cache/macbuild') };
 }
+
+test('profile env is merged across extends and exported', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'macbuild-profile-')), 'eas.json');
+  writeFileSync(file, JSON.stringify({
+    build: {
+      development: { developmentClient: true, distribution: 'internal', env: { FOO: 'parent', KEEP: '1' } },
+      'less-dev': { extends: 'development', env: { APP_VARIANT: 'dev', FOO: 'child' } },
+    },
+  }));
+  const exported = JSON.parse(execFileSync(process.execPath, [join(ROOT, 'lib/profile.mjs'), '--export-env', file, 'less-dev'], { encoding: 'utf8' }));
+  assert.deepEqual(exported, { FOO: 'child', KEEP: '1', APP_VARIANT: 'dev' });
+});
 
 test('add checks names and replaces only an exact match', () => {
   const { home, app, run, list } = sandbox();
@@ -86,6 +98,7 @@ test('a build answers the prompt, delivers the IPA and cleans up', () => {
   assert.match(result.stdout, /built: /);
   assert.equal(readFileSync(out, 'utf8'), 'IPA\n');
   assert.match(calls(), /^build --platform ios --profile development --local --output /);
+  assert.match(calls(), /EAS_BUILD_PROFILE=development/);
   assert.deepEqual(readdirSync(cache).filter((file) => file.endsWith('.ipa') || file === 'build.lock'), []);
   assert.deepEqual(readdirSync(join(home, 'tmp')).filter((file) => file.startsWith('macbuild-')), []);
   assert.ok(existsSync(join(home, 'Library/Logs/myapp-ios-build-development.log')));
@@ -215,6 +228,17 @@ test('builds, log and show read dashboard history', () => {
   const dumped = JSON.parse(run(['builds', '--json']).stdout);
   assert.equal(dumped[0].id, '20260102020202-other');
   assert.equal(dumped.length, 2);
+});
+
+test('a profile’s env is set before eas so app.config sees APP_VARIANT', () => {
+  const { home, app, run, calls } = sandbox();
+  writeFileSync(join(app, 'eas.json'), JSON.stringify({
+    build: { development: { developmentClient: true, distribution: 'internal', env: { APP_VARIANT: 'dev' } } },
+  }));
+  run(['add', 'myapp', app]);
+  const result = run(['myapp', '--output', join(home, 'out.ipa')]);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(calls(), /APP_VARIANT=dev/);
 });
 
 test('--skip-unchanged reuses a build whose native code is the same', () => {
