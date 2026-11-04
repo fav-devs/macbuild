@@ -1,0 +1,14 @@
+{
+  "id": "/", "name": "macbuild", "short_name": "macbuild", "description": "Local iOS builds on your Mac",
+  "start_url": "/", "scope": "/", "display": "standalone", "orientation": "portrait",
+  "background_color": "#111112", "theme_color": "#111112",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Projects", "url": "/#/projects", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Insights", "url": "/#/insights", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

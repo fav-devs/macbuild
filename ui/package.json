@@ -1,0 +1,1 @@
+{ "name": "macbuild-ui", "private": true, "type": "module", "dependencies": { "qrcode": "^1.5.4", "web-push": "^3.6.7" } }

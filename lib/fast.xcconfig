@@ -1,0 +1,3 @@
+// Opt-in via `macbuild --fast`: Xcode 26 compilation caching (C/C++/Obj-C and Swift), content-addressed in
+// ~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex, so unchanged files are not recompiled next build.
+COMPILATION_CACHE_ENABLE_CACHING = YES

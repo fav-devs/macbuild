@@ -1,0 +1,188 @@
+#!/bin/bash
+# Builds an iOS app on this Mac (eas build --local), answering the EAS prompts.
+#   macbuild <project> [--profile NAME] [--fast] [--install] [--send] [--testflight] [--output PATH]
+#   --profile     eas.json build profile (default development)
+#   --fast        fixed work directory + Xcode compilation caching, so later builds reuse compiled output
+#   --install     install on the paired iPhone with devicectl
+#   --send        Taildrop the IPA to the iPhone
+#   --testflight  production build, then upload to TestFlight (eas submit --path)
+#   --ref REF     build a pushed branch, tag or commit in a clean checkout (default: the working copy)
+# Other commands: macbuild list | add <name> <path> | scan | doctor
+# Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
+set -u
+START=$SECONDS
+HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../lib" ] || HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/.." && pwd)
+CONFIG="$HOME/.config/macbuild"; PROJECTS="${MACBUILD_PROJECTS:-$CONFIG/projects.conf}"
+[ -f "$CONFIG/env" ] && . "$CONFIG/env"
+add_project() {
+  local name="$1" dir
+  dir=$(cd "$2" 2>/dev/null && pwd) || { echo "no such folder: $2"; return 1; }
+  [ -f "$dir/eas.json" ] || { echo "no eas.json in $dir"; return 1; }
+  mkdir -p "$CONFIG"; touch "$PROJECTS"
+  grep -v "^$name|" "$PROJECTS" > "$PROJECTS.tmp" || true
+  echo "$name|$dir" >> "$PROJECTS.tmp"; mv "$PROJECTS.tmp" "$PROJECTS"; echo "added $name: $dir"
+}
+scan_projects() {
+  # Expo apps under the usual project folders; an app already listed keeps its name.
+  local root file dir name
+  for root in "$HOME/Documents" "$HOME/Developer" "$HOME/Projects" "$HOME/code" "$HOME/src"; do
+    [ -d "$root" ] || continue
+    find "$root" -maxdepth 4 -name eas.json -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | while read -r file; do
+      dir=$(dirname "$file"); name=$(basename "$dir" | tr '[:upper:] ' '[:lower:]-')
+      if ! grep -q "|$dir$" "$PROJECTS" 2>/dev/null; then add_project "$name" "$dir"; fi
+    done
+  done
+}
+doctor() {
+  local bad=0
+  ok() { printf '  ok    %-12s %s\n' "$1" "$2"; }
+  no() { printf '  MISS  %-12s %s\n' "$1" "$2"; bad=1; }
+  opt() { printf '  skip  %-12s %s\n' "$1" "$2"; }
+  [ "$(uname)" = Darwin ] && ok macOS "$(sw_vers -productVersion)" || no macOS "iOS builds need a Mac"
+  xcodebuild -version >/dev/null 2>&1 && ok Xcode "$(xcodebuild -version | head -1)" || no Xcode "install from the App Store, then run: sudo xcode-select -s /Applications/Xcode.app"
+  command -v node >/dev/null && ok node "$(node -v)" || no node "install Node.js 20 or newer"
+  command -v git >/dev/null && ok git "$(git --version | cut -d' ' -f3)" || no git "xcode-select --install"
+  command -v pod >/dev/null && ok CocoaPods "$(pod --version 2>/dev/null)" || no CocoaPods "brew install cocoapods"
+  command -v fastlane >/dev/null && ok fastlane "installed" || no fastlane "brew install fastlane"
+  if command -v eas >/dev/null; then
+    ok eas-cli "$(eas --version 2>/dev/null | grep -o 'eas-cli/[0-9.]*' | head -1)"
+    who=$(eas whoami 2>/dev/null | grep -vE 'eas-cli@|upgrade|npm install|outdated' | grep -m1 .); case "$who" in ""|*"Not logged in"*) no "Expo login" "run: eas login";; *) ok "Expo login" "$who";; esac
+  else no eas-cli "npm install -g eas-cli"; fi
+  command -v gh >/dev/null && gh auth status >/dev/null 2>&1 && ok "GitHub CLI" "signed in" || opt "GitHub CLI" "optional: PR and CI details in the web UI"
+  [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] || command -v tailscale >/dev/null && ok Tailscale "installed" || opt Tailscale "optional: needed to use the web UI from a phone"
+  [ -s "$PROJECTS" ] && ok projects "$(grep -c '|' "$PROJECTS") listed" || no projects "run: macbuild scan, or macbuild add <name> <path>"
+  return $bad
+}
+case "${1:-}" in
+  list) cat "$PROJECTS" 2>/dev/null; exit 0;;
+  add) add_project "${2:?usage: macbuild add <name> <path>}" "${3:?usage: macbuild add <name> <path>}"; exit $?;;
+  scan) scan_projects; exit 0;;
+  doctor) doctor; exit $?;;
+esac
+NAME=""; PROFILE=""; FAST=0; SEND=0; INSTALL=0; TESTFLIGHT=0; OUT=""; REF=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="${2:?--profile needs a name}"; shift;;
+    --output) OUT="${2:?--output needs a path}"; shift;;
+    --ref) REF="${2:?--ref needs a branch or commit}"; shift;;
+    --fast) FAST=1;; --send) SEND=1;; --install) INSTALL=1;; --testflight) TESTFLIGHT=1;;
+    --list) cat "$PROJECTS" 2>/dev/null; exit 0;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0;;
+    -*) echo "unknown option $1"; exit 2;;
+    *) NAME="$1";;
+  esac; shift
+done
+[ -n "$NAME" ] || { echo "usage: macbuild <project> [--install|--testflight|--fast|--send|--profile NAME]"; exit 2; }
+if [ "$TESTFLIGHT" = 1 ]; then PROFILE="${PROFILE:-production}"; fi
+PROFILE="${PROFILE:-development}"
+APP_DIR=$(awk -F'|' -v n="$NAME" '$1==n{print $2}' "$PROJECTS" 2>/dev/null); APP_DIR="${APP_DIR:-$HOME/Documents/$NAME}"
+[ -f "$APP_DIR/eas.json" ] || { echo "no eas.json in $APP_DIR"; exit 1; }
+CACHE="$HOME/.cache/macbuild"; mkdir -p "$CACHE"
+LOG="${MACBUILD_LOG:-$HOME/Library/Logs/$NAME-ios-build-$PROFILE.log}"
+DEVICE="${MACBUILD_DEVICE:-}"; TAILDROP="${MACBUILD_TAILDROP_TARGET:-}"
+IPA="$CACHE/$NAME-$PROFILE.ipa"; mkdir -p "$CACHE"; rm -f "$IPA"
+# Metro's temp cache embeds the absolute work directory, which changes per build: the next build then fails to resolve modules.
+rm -rf "${TMPDIR:-/tmp}/metro-cache" "${TMPDIR:-/tmp}"/metro-file-map-* "${TMPDIR:-/tmp}"/haste-map-* 2>/dev/null
+# A temporary EAS keychain left by a dead build stays in the search list, locked, and codesign can pick it (errSecInternalComponent).
+if ! pgrep -f eas_pty.py >/dev/null; then
+  for k in $(security list-keychains -d user | tr -d '"' | grep '/eas-build-.*\.keychain'); do security delete-keychain "$k" 2>/dev/null; done
+  rm -f "${TMPDIR:-/tmp}"/eas-build-*.keychain
+fi
+# MACBUILD_NODE picks the node that builds; every nvm version stays on the path so the global eas is found
+for d in "$HOME"/.nvm/versions/node/*/bin; do PATH="$PATH:$d"; done
+[ -n "${MACBUILD_NODE:-}" ] && PATH="$HOME/.nvm/versions/node/$MACBUILD_NODE/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"; unset DEVELOPER_DIR
+if [ "$FAST" = 1 ]; then
+  export EAS_LOCAL_BUILD_WORKINGDIR="$CACHE/work-$NAME-$PROFILE"; rm -rf "$EAS_LOCAL_BUILD_WORKINGDIR"; mkdir -p "$EAS_LOCAL_BUILD_WORKINGDIR"
+  export XCODE_XCCONFIG_FILE="$ROOT/lib/fast.xcconfig"
+fi
+# Prompts: "pattern|reply". SEEN[i] = log size when last answered, so a prompt that returns for the keyboard extension is
+# answered again. Indexed arrays only: macOS bash is 3.2.
+SPECS=(
+  '? Do you want to log in to your Apple account|y\n'
+  '? Reuse this distribution certificate|y\n'
+  '? Reuse this provisioning profile|y\n'
+  '? Generate a new Apple Provisioning Profile|y\n'
+  '? All your registered devices are present in the Provisioning Profile|\n'
+  '? Select devices for the ad hoc build|\n'
+  '? Select a Provider|\u001b[B\n'
+  '? Would you like to set up Push Notifications|\u001b[B\n'
+  '? Reuse this App Store Connect API Key|y\n'
+  '? Apple ID:|\n'
+)
+run_eas() {
+  local fifo pid status
+  fifo=$(mktemp -u /tmp/macbuild-in.XXXXXX); mkfifo "$fifo"
+  ( exec 3<>"$fifo"; exec nice -n 15 /usr/bin/python3 "$ROOT/lib/eas_pty.py" "$@" <&3 >>"$LOG" 2>&1 ) &
+  pid=$!
+  ( SEEN=(0 0 0 0 0 0 0 0 0 0)
+    while kill -0 $pid 2>/dev/null; do
+      for i in "${!SPECS[@]}"; do
+        spec="${SPECS[$i]}"; pattern="${spec%%|*}"; reply="${spec#*|}"
+        text=$(clean | tail -c +$(( SEEN[i] + 1 )) | tail -c 8000)
+        if printf '%s' "$text" | grep -q -F "$pattern"; then
+          printf '{"text":"%s"}\n' "$reply" > "$fifo"; sleep 2; SEEN[$i]=$(clean | wc -c)
+        fi
+      done
+      sleep 2
+    done ) &
+  wait $pid; status=$?; rm -f "$fifo"; return $status
+}
+checkout() {
+  # A worktree at the pushed commit: uncommitted files in the project never reach the build. EAS reads the app config from
+  # here, which needs node_modules; the build itself installs its own. .env files are ignored by git, so they are copied.
+  local repo sub sha src lock
+  repo=$(git -C "$APP_DIR" rev-parse --show-toplevel); sub=${APP_DIR#"$repo"}
+  git -C "$repo" fetch -q --prune origin || { echo "git fetch failed"; return 1; }
+  sha=$(git -C "$repo" rev-parse --verify -q "origin/$REF^{commit}" || git -C "$repo" rev-parse --verify -q "$REF^{commit}") || { echo "unknown ref $REF"; return 1; }
+  src="$CACHE/src/$NAME"; mkdir -p "$CACHE/src"
+  git -C "$repo" worktree remove --force "$src" 2>/dev/null || rm -rf "$src"; git -C "$repo" worktree prune
+  git -C "$repo" worktree add -q --detach "$src" "$sha" || return 1
+  WORKTREE_REPO=$repo; WORKTREE=$src
+  for f in .env .env.local; do [ -f "$APP_DIR/$f" ] && cp "$APP_DIR/$f" "$src$sub/$f"; done
+  for f in package-lock.json bun.lock bun.lockb pnpm-lock.yaml yarn.lock; do [ -f "$src/$f" ] && lock=$f && break; done
+  echo "source: $REF at ${sha:0:7}, dependencies from ${lock:-no lockfile}"
+  # Reuse the project's node_modules only when it matches this commit: another commit can need different packages.
+  if [ -n "${lock:-}" ] && [ -d "$repo/node_modules" ] && cmp -s "$repo/$lock" "$src/$lock"; then
+    ln -sfn "$repo/node_modules" "$src/node_modules"
+    if [ -n "$sub" ] && [ -d "$APP_DIR/node_modules" ]; then ln -sfn "$APP_DIR/node_modules" "$src$sub/node_modules"; fi
+  else
+    case "${lock:-}" in
+      package-lock.json) (cd "$src" && npm ci --ignore-scripts --no-audit --no-fund) ;;
+      bun.lock|bun.lockb) (cd "$src" && bun install --frozen-lockfile --ignore-scripts) ;;
+      pnpm-lock.yaml) (cd "$src" && pnpm install --frozen-lockfile --ignore-scripts) ;;
+      yarn.lock) (cd "$src" && yarn install --frozen-lockfile --ignore-scripts) ;;
+      *) (cd "$src" && npm install --ignore-scripts --no-audit --no-fund) ;;
+    esac || { echo "dependency install failed"; return 1; }
+  fi
+  APP_DIR="$src$sub"
+}
+clean() { sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$LOG"; }
+: > "$LOG"
+if [ -n "$REF" ]; then
+  trap '[ -n "${WORKTREE:-}" ] && git -C "$WORKTREE_REPO" worktree remove --force "$WORKTREE" 2>/dev/null' EXIT
+  checkout >> "$LOG" 2>&1 || { echo "checkout failed; log: $LOG"; tail -n 5 "$LOG"; exit 1; }
+fi
+cd "$APP_DIR" || exit 1
+echo "building $NAME ($PROFILE) on this Mac, log: $LOG"
+run_eas build --platform ios --profile "$PROFILE" --local --output "$IPA"; STATUS=$?
+if [ ! -f "$IPA" ]; then
+  echo "build failed (exit $STATUS); log: $LOG"; clean | grep -E "❌|error:|Error:" | head -8; exit 1
+fi
+DEST="${OUT:-$HOME/Desktop/$NAME-$PROFILE.ipa}"; cp "$IPA" "$DEST"
+echo "IPA: $DEST ($(du -h "$IPA" | cut -f1)) in $(( (SECONDS-START)/60 )) min"
+if [ "$SEND" = 1 ]; then
+  [ -n "$TAILDROP" ] || { echo "set MACBUILD_TAILDROP_TARGET"; exit 1; }
+  /Applications/Tailscale.app/Contents/MacOS/Tailscale file cp --name="$NAME-$PROFILE.ipa" "$IPA" "$TAILDROP:" && echo "sent to $TAILDROP"
+fi
+if [ "$INSTALL" = 1 ]; then
+  [ -n "$DEVICE" ] || { echo "set MACBUILD_DEVICE"; exit 1; }
+  xcrun devicectl device install app --device "$DEVICE" "$IPA" 2>&1 | tail -6
+fi
+if [ "$TESTFLIGHT" = 1 ]; then
+  echo "uploading to TestFlight"
+  run_eas submit --platform ios --profile production --path "$IPA" --wait; STATUS=$?
+  clean | tail -n 400 | grep -a -E 'Submitted your app|Submission details|failed|Error' | tail -4
+  [ $STATUS = 0 ] || { echo "upload failed (exit $STATUS); log: $LOG"; exit 1; }
+fi
