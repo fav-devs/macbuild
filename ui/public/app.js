@@ -455,13 +455,20 @@ async function buildPage(id) {
     }
   };
   every(1500, async () => {
-    if (!active(build)) return 'stop';
+    if (!active(build) && build.installed?.status !== 'installing') return 'stop';
     ({ build, lines, next } = await get(`/api/builds/${id}/log?from=${logFrom}`));
     ingest(lines); logFrom = next; draw();
-    return active(build) ? undefined : 'stop';
+    return active(build) || build.installed?.status === 'installing' ? undefined : 'stop';
   });
 }
 const installUrl = (build) => `itms-services://?action=download-manifest&url=${encodeURIComponent(`${location.origin}/ota/${build.id}/manifest.plist`)}`;
+function installNote(build) {
+  const installed = build.installed;
+  if (!installed) return '';
+  if (installed.status === 'installing') return `<p>Putting it on ${esc(installed.name || 'the iPhone')}…</p>`;
+  if (installed.error) return `<p class="hint bad">${esc(installed.error)}</p>`;
+  return `<p class="hint ok">On ${esc(installed.name)}</p>`;
+}
 function buildHead(build) {
   const file = hasFile(build);
   const apk = build.platform === 'android' && build.installable;
@@ -533,7 +540,9 @@ function buildTop(build) {
   } else if (build.platform === 'android' && build.installable) {
     aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download APK</a></div>`);
   } else if (build.installable) {
-    aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="${installUrl(build)}">${icon('phone')}Install on iPhone</a></div>`);
+    aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="${installUrl(build)}">${icon('phone')}Install on iPhone</a>
+      <button class="btn block" data-install="${esc(build.id)}" ${build.installed?.status === 'installing' ? 'disabled' : ''}>${icon('mac')}${build.installed?.status === 'installing' ? 'Installing…' : 'Install from this Mac'}</button>
+      ${installNote(build)}</div>`);
   } else {
     aside = card(storeName(build.platform), 'send', `<div class="install"><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download ${fileKind(build)}</a></div>`);
   }
@@ -814,11 +823,12 @@ function branchRow(name, branch, data, full = false) {
 }
 
 async function newBuildPage({ name, branch }) {
-  const data = await get(`/api/projects/${encodeURIComponent(name)}`);
+  const [data, setup] = await Promise.all([get(`/api/projects/${encodeURIComponent(name)}`), get('/api/setup').catch(() => ({}))]);
   const form = {
     source: branch === '' ? 'working' : 'branch',
     branch: branch || data.branches.find((item) => item.name === 'main')?.name || data.branches[0]?.name || '',
     commit: '', platform: 'ios', profile: data.profiles.find((item) => item.name === 'development')?.name ?? data.profiles[0]?.name, submit: false, skip: null,
+    install: setup.autoInstall && setup.autoInstall !== 'off',
   };
   if (!form.branch) form.source = 'working';
   let commits = [];
@@ -849,6 +859,7 @@ async function newBuildPage({ name, branch }) {
         <div class="choices" id="profiles"></div></div>`)}
       ${card('After the build', 'send', `<div class="rows"><label class="toggle"><span><b id="submit-label">Upload to TestFlight</b><small id="tf-note"></small></span><input class="switch" type="checkbox" id="submit"></label>
         <label class="toggle"><span><b>Reuse if unchanged</b><small id="skip-note"></small></span><input class="switch" type="checkbox" id="skip"></label>
+        <label class="toggle" id="phone-install-row"><span><b>Install on iPhone</b><small id="phone-install-note"></small></span><input class="switch" type="checkbox" id="phone-install"></label>
         <label class="toggle"><span><b>Build on every push</b><small id="auto-note"></small></span><input class="switch" type="checkbox" id="auto"></label></div>`)}
     </form>
     <aside class="stack"><section class="card" id="sum"></section></aside></div>`;
@@ -876,6 +887,12 @@ async function newBuildPage({ name, branch }) {
     $('#skip').checked = skip();
     $('#skip-note').textContent = form.submit ? 'Store uploads always build' : '';
     const rule = pushRule();
+    const phoneOk = form.platform === 'ios' && !target().simulator && !form.submit;
+    $('#phone-install-row').hidden = !phoneOk;
+    $('#phone-install').checked = phoneOk && form.install;
+    $('#phone-install-note').textContent = setup.phone
+      ? `${setup.phone.name}${setup.phone.wifi ? ' · Wi-Fi' : setup.phone.wired ? ' · USB' : ''}`
+      : 'Paired iPhone in Xcode';
     $('#auto').disabled = form.source !== 'branch';
     $('#auto').checked = Boolean(rule) && form.source === 'branch';
     $('#auto-note').textContent = form.source !== 'branch' ? 'Pick a GitHub branch' : '';
@@ -923,7 +940,7 @@ async function newBuildPage({ name, branch }) {
     if (event.target.closest('#go')) {
       const go = $('#go'); go.disabled = true;
       const ref = form.source === 'branch' ? form.commit || form.branch : null;
-      const created = await post('/api/builds', { project: name, profile: form.profile, platform: form.platform, ref, label: form.source === 'branch' ? form.branch : undefined, submit: form.submit, skipUnchanged: skip() });
+      const created = await post('/api/builds', { project: name, profile: form.profile, platform: form.platform, ref, label: form.source === 'branch' ? form.branch : undefined, submit: form.submit, skipUnchanged: skip(), install: form.platform === 'ios' && !target().simulator && !form.submit ? form.install : false });
       if (created.id) location.hash = `#/build/${created.id}`;
       else { $('#error').textContent = created.error ?? 'Could not start the build'; go.disabled = false; }
     }
@@ -935,6 +952,7 @@ async function newBuildPage({ name, branch }) {
     if (input.name === 'profile') { form.profile = input.value; form.skip = null; drawSummary(); }
     if (input.id === 'submit') { form.submit = input.checked; drawSummary(); }
     if (input.id === 'skip') { form.skip = input.checked; drawSummary(); }
+    if (input.id === 'phone-install') { form.install = input.checked; drawSummary(); }
     if (input.id === 'auto') {
       const result = await post('/api/triggers', { project: name, on: 'push', branch: form.branch, profile: form.profile, platform: form.platform, submit: form.submit, skipUnchanged: skip(), enabled: input.checked });
       if (result.error) $('#error').textContent = result.error;
@@ -1122,6 +1140,8 @@ async function settingsPage() {
       ${card('On this Mac', 'mac', `<div class="rows">
         <label class="toggle"><span><b>Open at login</b></span><input class="switch" type="checkbox" id="login-at-login" ${setup.loginAtLogin ? 'checked' : ''}></label>
         <label class="toggle"><span><b>Menu bar</b></span><input class="switch" type="checkbox" id="menubar" ${setup.menubar ? 'checked' : ''}></label>
+        <div class="toggle" style="cursor:default"><span><b>Install on iPhone</b><small>${setup.phone ? `${esc(setup.phone.name)}${setup.phone.wifi ? ' · Wi-Fi' : setup.phone.wired ? ' · USB' : ''}` : 'After a finished iOS build'}</small></span>
+          <div class="seg" role="group" aria-label="Install on iPhone" id="auto-install">${[['off', 'Off'], ['wifi', 'Wi-Fi'], ['always', 'Always']].map(([value, label]) => `<button type="button" data-auto-install="${value}" class="${(settings.autoInstall || 'off') === value ? 'on' : ''}">${label}</button>`).join('')}</div></div>
         <a class="row compact" href="#/setup"><span class="main"><span class="title">Setup guide</span></span>${icon('right', 'sm')}</a>
       </div>`)}
     </div><div class="stack">
@@ -1165,6 +1185,13 @@ async function settingsPage() {
   if (login) login.onchange = () => saveMac({ loginAtLogin: login.checked }, login);
   const bar = $('#menubar');
   if (bar) bar.onchange = () => saveMac({ menubar: bar.checked }, bar);
+  const autoInstall = $('#auto-install');
+  if (autoInstall) autoInstall.onclick = async (event) => {
+    const button = event.target.closest('[data-auto-install]');
+    if (!button) return;
+    autoInstall.querySelectorAll('button').forEach((item) => item.classList.toggle('on', item === button));
+    await saveSetting({ autoInstall: button.dataset.autoInstall }, $('#hook-note'));
+  };
   $('#hook-form').onsubmit = async (event) => { event.preventDefault(); if ($('#hook').value && await saveSetting({ webhook: $('#hook').value.trim() }, $('#hook-note'))) route(); };
   $('#team-form').onsubmit = async (event) => {
     event.preventDefault();
@@ -1271,11 +1298,18 @@ document.addEventListener('click', async (event) => {
   const rebuild = event.target.closest('[data-rebuild]');
   const remove = event.target.closest('.remove-rule');
   const simulator = event.target.closest('[data-simulator]');
+  const install = event.target.closest('[data-install]');
   if (simulator) {
     simulator.disabled = true;
     const result = await post(`/api/builds/${simulator.dataset.simulator}/simulator`);
     simulator.disabled = false;
     flash(result.error ?? `Opened ${result.bundle} in the Simulator on ${machineName()}.`, Boolean(result.error));
+  }
+  if (install) {
+    install.disabled = true;
+    const result = await post(`/api/builds/${install.dataset.install}/install`);
+    if (result.error) { install.disabled = false; flash(result.error, true); }
+    else { flash(result.installed?.error ?? (result.installed?.name ? `On ${result.installed.name}` : 'Installing…'), Boolean(result.installed?.error)); route(); }
   }
   if (cancel && confirm('Cancel this build?')) { await post(`/api/builds/${cancel.dataset.cancel}/cancel`); route(); }
   if (rebuild && confirm('Build this again?')) {

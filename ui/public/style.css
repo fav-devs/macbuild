@@ -281,6 +281,7 @@ a.row:hover, button.row:hover { background: var(--hover); }
 .toggle b { display: block; font-weight: 600; }
 .toggle small { display: block; margin-top: 2px; color: var(--text-2); font-size: 12.5px; }
 .toggle small:empty { display: none; }
+.toggle .seg { flex: none; }
 .choices { display: grid; gap: 8px; }
 @media (min-width: 720px) { .choices { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); } }
 .choice { position: relative; display: grid; gap: 3px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--surface); cursor: pointer; box-shadow: var(--shadow); transition: border-color .12s, box-shadow .12s; }

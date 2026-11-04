@@ -3,7 +3,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -104,6 +104,20 @@ case "$1 $2" in
 esac
 `, { mode: 0o755 });
   // Fake macbuild: fail.app fails with a known error, skip.app reuses its first build, slow.app takes three seconds.
+  writeFileSync(join(bin, 'xcrun'), `#!/bin/bash
+echo "$*" >> "${dir}/xcrun-calls"
+if [ "$1" = devicectl ] && [ "$2" = list ]; then
+  out=""; prev=""
+  for a in "$@"; do [ "$prev" = --json-output ] && out=$a; prev=$a; done
+  [ -n "$out" ] || exit 1
+  cat > "$out" <<'JSON'
+{"result":{"devices":[{"identifier":"phone-1","connectionProperties":{"pairingState":"paired","transportType":"localNetwork"},"deviceProperties":{"name":"Test iPhone"},"hardwareProperties":{"deviceType":"iPhone","udid":"udid-1","marketingName":"iPhone 14"}}]}}
+JSON
+  exit 0
+fi
+if [ "$1" = devicectl ] && [ "$2" = device ] && [ "$3" = install ]; then exit 0; fi
+exit 1
+`, { mode: 0o755 });
   writeFileSync(join(bin, 'macbuild'), `#!/bin/bash
 case "$1" in
   doctor) echo '{"ok":true,"items":[{"id":"macos","label":"macOS","status":"ok","detail":"15.0"},{"id":"projects","label":"projects","status":"ok","detail":"6 listed"}]}'; exit 0;;
@@ -266,7 +280,34 @@ test('settings are checked, and the webhook stays secret', async () => {
   const saved = await request('/api/settings', { method: 'POST', body: { appleTeam: 'ABCDE12345' } });
   assert.equal(saved.json.appleTeam, 'ABCDE12345');
   const { json } = await request('/api/system');
-  assert.deepEqual(json.settings, { webhook: `127.0.0.1:${hookServer.address().port}`, githubStatus: true, appleTeam: 'ABCDE12345' });
+  assert.deepEqual(json.settings, { webhook: `127.0.0.1:${hookServer.address().port}`, githubStatus: true, appleTeam: 'ABCDE12345', autoInstall: 'off' });
+});
+
+test('a finished IPA can be installed on a paired iPhone', async () => {
+  assert.equal((await request('/api/settings', { method: 'POST', body: { autoInstall: 'nope' } })).status, 400);
+  const saved = await request('/api/settings', { method: 'POST', body: { autoInstall: 'wifi' } });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.autoInstall, 'wifi');
+  const finished = await done((await request('/api/builds', { method: 'POST', body: { project: 'my_app', profile: 'development' } })).json.id);
+  const src = join(dir, 'ipa-src');
+  mkdirSync(join(src, 'Payload/App.app'), { recursive: true });
+  writeFileSync(join(src, 'Payload/App.app/Info.plist'), 'ok');
+  const ipa = join(dir, 'builds', finished.id, 'app.ipa');
+  rmSync(ipa, { force: true });
+  execFileSync('zip', ['-qr', ipa, 'Payload'], { cwd: src });
+  const installed = await request(`/api/builds/${finished.id}/install`, { method: 'POST' });
+  assert.equal(installed.status, 200, JSON.stringify(installed.json));
+  assert.equal(installed.json.installed.name, 'Test iPhone');
+  assert.equal(installed.json.installed.status, 'ok');
+  assert.match(readFileSync(join(dir, 'xcrun-calls'), 'utf8'), /device install app --device phone-1/);
+});
+
+test('install: true tries the iPhone after a successful build', async () => {
+  await pause(1100);
+  const created = await request('/api/builds', { method: 'POST', body: { project: 'my_app', profile: 'development', install: true } });
+  const finished = await done(created.json.id);
+  const installed = await until(async () => (await request(`/api/builds/${finished.id}`)).json.installed);
+  assert.ok(installed.error);
 });
 
 test('disk cleanup measures and clears only known folders', async () => {

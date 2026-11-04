@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import QRCode from 'qrcode';
 import webpush from 'web-push';
 import { diagnose } from '../lib/diagnose.mjs';
+import { listDevices, pickDevice, preferredDeviceId, tryInstall } from '../lib/device.mjs';
 import { readProfiles } from '../lib/profile.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
 
@@ -219,7 +220,7 @@ async function commitInfo(repo, ref) {
 function easProfiles(dir) {
   try { return readProfiles(join(dir, 'eas.json')); } catch { return []; }
 }
-async function enqueue({ project, profile, platform = 'ios', ref, label, submit, skipUnchanged, trigger, by }) {
+async function enqueue({ project, profile, platform = 'ios', ref, label, submit, skipUnchanged, install, trigger, by }) {
   const known = projects().find((candidate) => candidate.name === project);
   if (!known) return { error: 'unknown project' };
   if (!['ios', 'android'].includes(platform)) return { error: 'unknown platform' };
@@ -244,6 +245,7 @@ async function enqueue({ project, profile, platform = 'ios', ref, label, submit,
     devClient: chosen.developmentClient, skipUnchanged: Boolean(skipUnchanged) && !submit,
     source: ref ? 'github' : 'working', ref: branch, commit, pr: pr ?? null, repo: repoSlug, trigger, by: by ?? null, status: 'queued', createdAt: Date.now(),
     dirty: ref ? 0 : (await git(repo, 'status', '--porcelain')).split('\n').filter(Boolean).length,
+    ...(install === undefined ? {} : { install: Boolean(install) }),
   };
   if (existsSync(metaOf(build.id))) return { error: 'a build just started' };
   mkdirSync(dirOf(build.id), { recursive: true });
@@ -358,10 +360,12 @@ async function toolVersions() {
   tools.android = existsSync(androidHome());
   return tools;
 }
+const AUTO_INSTALL = new Set(['off', 'wifi', 'always']);
+const autoInstallMode = () => (AUTO_INSTALL.has(config().autoInstall) ? config().autoInstall : 'off');
 const settingsView = () => {
   const { webhook, githubStatus, appleTeam } = config();
   // The webhook's host only: the rest of its URL is a secret.
-  return { webhook: webhook ? hostOf(webhook) || 'set' : '', githubStatus: Boolean(githubStatus), appleTeam: appleTeam ?? '' };
+  return { webhook: webhook ? hostOf(webhook) || 'set' : '', githubStatus: Boolean(githubStatus), appleTeam: appleTeam ?? '', autoInstall: autoInstallMode() };
 };
 
 const UI_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.ui.plist');
@@ -411,7 +415,41 @@ async function setupView() {
     phoneUrl: phoneUrl(),
     doctor,
     projects: projects().map((project) => project.name),
+    autoInstall: autoInstallMode(),
+    phone: await phoneView(),
   };
+}
+async function phoneView() {
+  const devices = await listDevices();
+  const phone = pickDevice(devices, { preferred: preferredDeviceId() }) ?? devices.find((item) => item.type === 'iPhone') ?? null;
+  return phone ? { name: phone.name, wifi: phone.wifi, wired: phone.wired } : null;
+}
+function phoneIpa(build) {
+  return platformOf(build) === 'ios' && !build.simulator && (build.artifact ?? 'app.ipa') === 'app.ipa' && existsSync(artifactOf(build));
+}
+function autoInstallFor(build) {
+  if (build.install === false) return 'off';
+  const mode = autoInstallMode();
+  if (build.install === true) return mode === 'wifi' ? 'wifi' : 'always';
+  return mode;
+}
+function shouldAutoInstall(build) {
+  const mode = autoInstallFor(build);
+  if (mode === 'off' || !phoneIpa(build)) return null;
+  if (build.install !== true && build.installable !== true) return null;
+  return mode;
+}
+async function installOnPhone(build, { wifiOnly } = {}) {
+  save({ ...read(build.id), installed: { status: 'installing', at: Date.now() } });
+  const result = await tryInstall(artifactOf(build), { wifiOnly, preferred: preferredDeviceId() });
+  const installed = result.error ? result : { ...result, status: 'ok' };
+  save({ ...read(build.id), installed });
+  return installed;
+}
+function maybeInstall(build) {
+  const mode = shouldAutoInstall(build);
+  if (!mode) return;
+  installOnPhone(build, { wifiOnly: mode === 'wifi' }).catch((error) => console.error('install', build.id, error.message));
 }
 function menubarView() {
   const builds = allBuilds();
@@ -751,6 +789,7 @@ async function finish(build, code) {
     if (before && build.ipaBytes) build.sizeBefore = before.ipaBytes;
   }
   save(build);
+  if (build.status === 'success') maybeInstall(build);
   notify(build).catch((error) => console.error('notify', error.message));
   sendWebhook(build).catch((error) => console.error('webhook', error.message));
   const state = { success: 'success', skipped: 'success', failed: 'failure' }[build.status] ?? 'error';
@@ -866,7 +905,7 @@ async function rules(req, res) {
   return json(res, 200, { triggers });
 }
 async function settings(req, res) {
-  const { webhook, githubStatus, appleTeam } = await body(req);
+  const { webhook, githubStatus, appleTeam, autoInstall } = await body(req);
   const changes = {};
   if (webhook !== undefined) {
     if (webhook && !/^https:\/\/[^\s/]+\/\S*$/.test(webhook)) return json(res, 400, { error: 'The webhook URL has to start with https://' });
@@ -877,6 +916,10 @@ async function settings(req, res) {
     if (appleTeam && !/^[A-Z0-9]{10}$/.test(appleTeam)) return json(res, 400, { error: 'An Apple Team ID is 10 capital letters and digits.' });
     changes.appleTeam = appleTeam || undefined;
     expoCache.clear();
+  }
+  if (autoInstall !== undefined) {
+    if (!AUTO_INSTALL.has(autoInstall)) return json(res, 400, { error: 'Install on iPhone is off, wifi, or always.' });
+    changes.autoInstall = autoInstall === 'off' ? undefined : autoInstall;
   }
   saveConfig(changes);
   return json(res, 200, settingsView());
@@ -956,9 +999,9 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/triggers' && req.method === 'POST') return rules(req, res);
   if (url.pathname === '/api/builds' && req.method === 'POST') {
-    const { project, profile, platform, ref, label, submit, skipUnchanged } = await body(req);
+    const { project, profile, platform, ref, label, submit, skipUnchanged, install } = await body(req);
     if (label && !validRef(label)) return json(res, 400, { error: 'bad branch' });
-    const build = await enqueue({ project, profile, platform, ref, label, submit, skipUnchanged, trigger: 'manual', by: who(req) });
+    const build = await enqueue({ project, profile, platform, ref, label, submit, skipUnchanged, install, trigger: 'manual', by: who(req) });
     return json(res, build.error ? 400 : 201, build);
   }
   const id = parts[2];
@@ -971,6 +1014,13 @@ async function api(req, res, url) {
     }
     if (parts[3] === 'simulator' && req.method === 'POST') {
       try { return json(res, 200, await openInSimulator(read(id))); } catch (error) { return json(res, 400, { error: error.message.split('\n')[0] }); }
+    }
+    if (parts[3] === 'install' && req.method === 'POST') {
+      const build = read(id);
+      if (!phoneIpa(build)) return json(res, 400, { error: 'This build isn’t an iOS app, or its file was removed.' });
+      if (build.installed?.status === 'installing') return json(res, 200, build);
+      try { return json(res, 200, { ...read(id), installed: await installOnPhone(build) }); }
+      catch (error) { return json(res, 400, { error: error.message.split('\n')[0] }); }
     }
     if (parts[3] === 'qr.svg' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'no-store' });

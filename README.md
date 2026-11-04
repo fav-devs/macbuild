@@ -109,7 +109,7 @@ Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on
 - Follow a build live: its current phase, the time left going by your usual build time, and logs grouped by phase on a timeline
 - See commit, PR, GitHub checks, version, channel, app size and its change, signing expiry and who started it for each build
 - When a build fails, the likely cause and how to fix it
-- Install dev builds on an iPhone over the air or by QR code, download Android APKs, or open Simulator builds in the Simulator on the Mac
+- Install dev builds on an iPhone over the air or by QR code, put them on a paired iPhone from this Mac (Wi-Fi or always), download Android APKs, or open Simulator builds in the Simulator on the Mac
 - Build automatically on every push, for each pull request, or every night; a newer push replaces a build that hasn't started
 - Post each build's status to its commit on GitHub, and a message to Slack or Discord
 - A page for each project's builds, branches, submissions, update channels, signing and devices, environment variable names, and build automation, with Expo's data read-only
