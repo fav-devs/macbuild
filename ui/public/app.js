@@ -430,7 +430,7 @@ async function buildPage(id) {
     }
   };
   const draw = () => {
-    const key = `${build.status}|${build.phases?.length ?? 0}|${build.finishedAt ?? ''}|${build.ipaBytes ?? ''}`;
+    const key = `${build.status}|${build.phases?.length ?? 0}|${build.finishedAt ?? ''}|${build.ipaBytes ?? ''}|${build.ask?.threadId ?? ''}|${build.ask?.link ?? ''}`;
     if (key !== shownKey) {
       shownKey = key;
       $('#b-head').innerHTML = buildHead(build);
@@ -462,6 +462,11 @@ async function buildPage(id) {
   });
 }
 const installUrl = (build) => `itms-services://?action=download-manifest&url=${encodeURIComponent(`${location.origin}/ota/${build.id}/manifest.plist`)}`;
+function askOpen(build, cls) {
+  if (build.ask?.link) return `<a class="${cls}" href="${esc(build.ask.link)}" target="_blank" rel="noreferrer">${cls.includes('sm') ? '' : icon('braces')}Open in T3 Code</a>`;
+  if (build.ask?.threadId) return `<span class="faint">Sent to agent</span>`;
+  return `<button class="${cls}" data-ask="${esc(build.id)}">${cls.includes('sm') ? '' : icon('braces')}Send to agent</button>`;
+}
 function installNote(build) {
   const installed = build.installed;
   if (!installed) return '';
@@ -480,6 +485,7 @@ function buildHead(build) {
     build.reusedFrom ? `<a class="btn primary" href="#/build/${esc(build.reusedFrom)}">${icon('right')}Open the reused build</a>` : '',
     file && !apk ? `<a class="btn" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}${fileKind(build)}</a>` : '',
     active(build) ? `<button class="btn danger" data-cancel="${esc(build.id)}" ${build.status === 'cancelling' ? 'disabled' : ''}>${icon('ban')}Cancel</button>` : `<button class="btn" data-rebuild="${esc(build.id)}">${icon('rebuild')}Rebuild</button>`,
+    build.status === 'failed' ? askOpen(build, 'btn') : '',
   ].join('');
   const person = build.by?.name ?? build.commit?.author;
   return `<header class="head"><div class="bhead">${avatar(build.project, 'lg')}<div><h1>${esc(subject(build))}</h1>
@@ -496,7 +502,8 @@ function buildAlert(build) {
     const phase = build.phases?.at(-1)?.name;
     return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}</b>
       ${build.hint ? `<p class="fix"><strong>Likely cause: ${esc(build.hint.title)}.</strong> ${fixHtml(build.hint.fix)}</p>` : ''}
-      ${build.reason ? `<code>${esc(build.reason)}</code>` : ''}<button class="btn sm" data-show-failure>Show the log</button></div></div>`;
+      ${build.reason ? `<code>${esc(build.reason)}</code>` : ''}
+      <div class="inline">${askOpen(build, 'btn sm')}<button class="btn sm ghost" data-ask="${esc(build.id)}" data-provider="codex">Codex</button><button class="btn sm" data-show-failure>Show the log</button></div></div></div>`;
   }
   if (build.status === 'skipped') {
     return `<div class="callout info" style="margin-bottom:20px">${icon('skip')}<div><b>Reused an earlier build</b>${build.reusedFrom ? `<span class="muted"><a class="link" href="#/build/${esc(build.reusedFrom)}">Open it</a></span>` : ''}</div></div>`;
@@ -1296,6 +1303,7 @@ document.addEventListener('click', async (event) => {
   if (event.target.dataset?.tip !== undefined) { showTip(event.target); return; }
   const cancel = event.target.closest('[data-cancel]');
   const rebuild = event.target.closest('[data-rebuild]');
+  const ask = event.target.closest('[data-ask]');
   const remove = event.target.closest('.remove-rule');
   const simulator = event.target.closest('[data-simulator]');
   const install = event.target.closest('[data-install]');
@@ -1315,6 +1323,13 @@ document.addEventListener('click', async (event) => {
   if (rebuild && confirm('Build this again?')) {
     const created = await post(`/api/builds/${rebuild.dataset.rebuild}/rebuild`);
     if (created.id) location.hash = `#/build/${created.id}`;
+  }
+  if (ask) {
+    ask.disabled = true;
+    const result = await post(`/api/builds/${ask.dataset.ask}/ask`, { provider: ask.dataset.provider || '' });
+    ask.disabled = false;
+    if (result.error && !result.threadId) flash(result.error, true);
+    else { flash(result.link ? 'Opened in T3 Code' : 'Sent to agent'); route(); }
   }
   if (remove) { await post('/api/triggers', { project: remove.dataset.project, on: remove.dataset.on, branch: remove.dataset.branch, enabled: false }); route(); }
 });

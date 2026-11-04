@@ -152,7 +152,7 @@ head -c 2048 /dev/zero > "$out"
     env: {
       ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, MACBUILD_UI_PORT: String(port), MACBUILD_UI_URL: `https://${TAILNET}`,
       MACBUILD_BIN: join(bin, 'macbuild'), MACBUILD_DATA: join(dir, 'builds'), MACBUILD_PROJECTS: join(dir, 'projects.conf'), MACBUILD_CONFIG: join(dir, 'ui.json'),
-      MACBUILD_TAILSCALE: '',
+      MACBUILD_T3: join(bin, 't3'), MACBUILD_TAILSCALE: '',
     },
   });
   globalThis.apps = apps;
@@ -407,6 +407,42 @@ test('a rule for a removed project can be removed', async () => {
   const removed = await request('/api/triggers', { method: 'POST', body: { project: 'gone', branch: 'main', enabled: false } });
   assert.equal(removed.status, 200);
   assert.equal(removed.json.triggers.some((rule) => rule.project === 'gone'), false);
+});
+
+test('a failed build can be sent to T3 Code in the project folder', async () => {
+  const t3 = join(dir, 'bin/t3');
+  writeFileSync(t3, `#!/bin/bash
+echo "$*" >> "${dir}/t3-ask-calls"
+if [ "$2" = start ]; then
+  cat > "${dir}/t3-ask-prompt"
+  echo '{"threadId":"t-ask","title":"macbuild fix 20260104162904-my-app","link":"","status":"running"}'
+  exit 0
+fi
+if [ "$2" = show ]; then
+  echo '{"threadId":"t-ask","title":"macbuild fix 20260104162904-my-app","link":"http://127.0.0.1:3773/t-ask","status":"running"}'
+  exit 0
+fi
+exit 0
+`, { mode: 0o755 });
+  const id = '20260104162904-my-app';
+  mkdirSync(join(dir, 'builds', id), { recursive: true });
+  writeFileSync(join(dir, 'builds', id, 'meta.json'), JSON.stringify({
+    id, project: 'my_app', platform: 'ios', action: 'build', profile: 'development',
+    status: 'failed', reason: 'expo config --json exited with non-zero code: 1', createdAt: Date.now(),
+  }));
+  writeFileSync(join(dir, 'builds', id, 'build.log'), '/app/node_modules/expo/bin/cli config --json exited with non-zero code: 1\n');
+  const started = await request(`/api/builds/${id}/ask`, { method: 'POST', body: { provider: 'codex' } });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  assert.equal(started.json.threadId, 't-ask');
+  assert.match(readFileSync(join(dir, 't3-ask-calls'), 'utf8'), /--provider codex/);
+  assert.match(readFileSync(join(dir, 't3-ask-prompt'), 'utf8'), /Folder:/);
+  assert.match(readFileSync(join(dir, 't3-ask-prompt'), 'utf8'), /my_app/);
+  const saved = await request(`/api/builds/${id}`);
+  assert.equal(saved.json.ask.threadId, 't-ask');
+  assert.equal(saved.json.ask.link, 'http://127.0.0.1:3773/t-ask');
+  const logged = await request(`/api/builds/${id}/log?from=0`);
+  assert.equal(logged.json.build.ask.threadId, 't-ask');
+  assert.equal(logged.json.build.ask.link, 'http://127.0.0.1:3773/t-ask');
 });
 
 test('the dashboard starts Tailscale and publishes Serve', async () => {

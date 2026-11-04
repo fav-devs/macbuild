@@ -13,6 +13,7 @@ import { diagnose } from '../lib/diagnose.mjs';
 import { listDevices, pickDevice, preferredDeviceId, tryInstall } from '../lib/device.mjs';
 import { readProfiles } from '../lib/profile.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
+import { startAsk } from '../lib/ask.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1126,6 +1127,15 @@ async function api(req, res, url) {
       const old = read(id);
       const build = await enqueue({ project: old.project, profile: old.profile, platform: platformOf(old), ref: old.source === 'working' ? null : old.commit.hash, label: old.ref, submit: submits(old), skipUnchanged: false, trigger: 'rebuild', by: who(req) });
       return json(res, build.error ? 400 : 201, build);
+    }
+    if (parts[3] === 'ask' && req.method === 'POST') {
+      const old = read(id);
+      const project = projects().find((known) => known.name === old.project);
+      if (!project) return json(res, 404, { error: 'unknown project' });
+      const { provider, model } = await body(req).catch(() => ({}));
+      const result = await startAsk({ build: old, dir: project.dir, provider: provider === 'codex' ? 'codex' : (provider || ''), model: model || '', wait: false, open: true });
+      if (result.threadId) save({ ...read(id), ask: { threadId: result.threadId, title: result.title, link: result.link, status: result.status, provider: result.provider || '', at: Date.now() } });
+      return json(res, result.error && !result.threadId ? 400 : 200, result);
     }
     if (parts[3] === 'simulator' && req.method === 'POST') {
       try { return json(res, 200, await openInSimulator(read(id))); } catch (error) { return json(res, 400, { error: error.message.split('\n')[0] }); }
