@@ -9,6 +9,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// Profiles for each kind of build: a development client (an APK on Android), a simulator build, and a store build.
+const EAS_JSON = JSON.stringify({ build: { development: { developmentClient: true, distribution: 'internal' }, simulator: { extends: 'development', ios: { simulator: true } }, production: {} } });
 const MACBUILD = join(ROOT, 'bin/macbuild');
 // Asks one signing question the way eas does, colours included, then writes the IPA where --output says.
 const FAKE_EAS = `#!/bin/bash
@@ -19,6 +21,7 @@ read -r reply
 [ "$reply" = y ] || { echo "no answer: $reply"; exit 1; }
 [ "\${FAKE_EAS:-}" = slow ] && sleep 3
 [ "\${FAKE_EAS:-}" = fail ] && { echo "Error: build failed"; exit 1; }
+[ "\${FAKE_EAS:-}" = provision ] && { echo "❌ error: Provisioning profile \"*[expo] com.acme.app AdHoc\" doesn't include the currently selected device \"Phone\"."; exit 1; }
 echo IPA > "$out"
 `;
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args], { cwd, stdio: 'pipe' }).toString().trim();
@@ -29,7 +32,7 @@ function sandbox() {
   writeFileSync(join(home, 'bin/eas'), FAKE_EAS, { mode: 0o755 });
   const app = join(home, 'code/myapp');
   mkdirSync(app, { recursive: true });
-  writeFileSync(join(app, 'eas.json'), '{}');
+  writeFileSync(join(app, 'eas.json'), EAS_JSON);
   const env = { ...process.env, HOME: home, TMPDIR: join(home, 'tmp'), PATH: `${join(home, 'bin')}:${process.env.PATH}` };
   for (const name of Object.keys(env)) if (name.startsWith('MACBUILD_')) delete env[name];
   const run = (args, extra = {}) => spawnSync(MACBUILD, args, { env: { ...env, ...extra }, encoding: 'utf8', timeout: 60000 });
@@ -80,7 +83,7 @@ test('a build answers the prompt, delivers the IPA and cleans up', () => {
   const out = join(home, 'out.ipa');
   const result = run(['myapp', '--output', out]);
   assert.equal(result.status, 0, result.stdout);
-  assert.match(result.stdout, /IPA: /);
+  assert.match(result.stdout, /built: /);
   assert.equal(readFileSync(out, 'utf8'), 'IPA\n');
   assert.match(calls(), /^build --platform ios --profile development --local --output /);
   assert.deepEqual(readdirSync(cache).filter((file) => file.endsWith('.ipa') || file === 'build.lock'), []);
@@ -140,7 +143,7 @@ test('--ref builds a clean checkout of a monorepo app reached through a symlink'
   mkdirSync(app, { recursive: true });
   writeFileSync(join(repo, '.gitignore'), 'node_modules\n.env\n');
   writeFileSync(join(repo, 'package-lock.json'), '{}\n');
-  writeFileSync(join(app, 'eas.json'), '{}');
+  writeFileSync(join(app, 'eas.json'), EAS_JSON);
   git(home, 'init', '-q', '--bare', 'origin.git');
   git(repo, 'init', '-q', '-b', 'main');
   git(repo, 'add', '.');
@@ -155,6 +158,59 @@ test('--ref builds a clean checkout of a monorepo app reached through a symlink'
   assert.equal(result.status, 0, result.stdout);
   assert.match(calls(), new RegExp(`cwd=${cache}/src/mobile/apps/mobile env=yes`));
   assert.equal(existsSync(join(cache, 'src/mobile')), false);
+});
+
+test('Android builds an APK for development and refuses to install an AAB', () => {
+  const { home, app, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  const result = run(['myapp', '--android', '--output', join(home, 'out.apk')]);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(calls(), /^build --platform android --profile development --local --output .*\.apk /);
+  assert.ok(existsSync(join(home, 'out.apk')));
+  const aab = run(['myapp', '--android', '--profile', 'production', '--install']);
+  assert.equal(aab.status, 2);
+  assert.match(aab.stdout, /AAB/);
+  assert.equal(run(['myapp', '--android', '--testflight']).status, 2);
+});
+
+test('a simulator profile builds a .tar.gz, and an unknown profile is refused', () => {
+  const { home, app, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  const result = run(['myapp', '--profile', 'simulator', '--output', join(home, 'sim.tar.gz')]);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(calls(), /--profile simulator --local --output .*\.tar\.gz /);
+  const missing = run(['myapp', '--profile', 'nope']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stdout, /no build profile "nope"/);
+});
+
+test('--skip-unchanged reuses a build whose native code is the same', () => {
+  const { home, app, run, calls } = sandbox();
+  // A stand-in for the project's own @expo/fingerprint: the hash comes from FAKE_FP.
+  mkdirSync(join(app, 'node_modules/@expo/fingerprint'), { recursive: true });
+  writeFileSync(join(app, 'node_modules/@expo/fingerprint/package.json'), '{"name":"@expo/fingerprint","main":"index.js"}');
+  writeFileSync(join(app, 'node_modules/@expo/fingerprint/index.js'), 'exports.createFingerprintAsync = async (dir, options) => ({ hash: `${process.env.FAKE_FP}-${options.platforms[0]}` });');
+  run(['add', 'myapp', app]);
+  const builds = () => calls().split('\n').filter((line) => line.startsWith('build ')).length;
+  assert.equal(run(['myapp', '--skip-unchanged', '--output', join(home, 'one.ipa')], { FAKE_FP: 'aaa' }).status, 0);
+  const again = run(['myapp', '--skip-unchanged', '--output', join(home, 'two.ipa')], { FAKE_FP: 'aaa' });
+  assert.equal(again.status, 0, again.stdout);
+  assert.match(again.stdout, /native code unchanged/);
+  assert.equal(builds(), 1);
+  assert.equal(existsSync(join(home, 'two.ipa')), false);
+  assert.equal(run(['myapp', '--skip-unchanged', '--output', join(home, 'three.ipa')], { FAKE_FP: 'bbb' }).status, 0);
+  assert.equal(builds(), 2);
+  assert.match(readFileSync(join(home, '.local/share/macbuild/fingerprints'), 'utf8'), /myapp\|development\|ios\|bbb-ios\|/);
+  assert.equal(run(['myapp', '--skip-unchanged', '--submit'], { FAKE_FP: 'bbb' }).status, 2);
+});
+
+test('a failed build names a known cause and its fix', () => {
+  const { app, run } = sandbox();
+  run(['add', 'myapp', app]);
+  const result = run(['myapp'], { FAKE_EAS: 'provision' });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /likely cause: The provisioning profile is missing this device/);
+  assert.match(result.stdout, /eas device:create/);
 });
 
 test('the eas guard blocks cloud builds only', () => {

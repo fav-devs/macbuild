@@ -42,6 +42,9 @@ const ICONS = {
   cloudoff: '<path d="m3 3 18 18M8 6.4A6.5 6.5 0 0 1 18.1 10h.4a4 4 0 0 1 2.4 7.2M17 18H6.5a4.5 4.5 0 0 1-1.2-8.8"/>',
   timer: '<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.5 1.5M9.5 2.5h5"/>',
   x: '<path d="m6 6 12 12M18 6 6 18"/>',
+  skip: '<circle cx="12" cy="12" r="9.2"/><path d="m8.2 8.5 3.5 3.5-3.5 3.5M12.8 8.5l3.5 3.5-3.5 3.5"/>',
+  link: '<path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.4L11.6 6.4"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5l-2.7 2.7a4.5 4.5 0 0 0 6.4 6.4l1.5-1.5"/>',
+  broom: '<path d="M14.5 3.5 10 12M7 12.5h7.5l2 8H4.5z"/><path d="M8.5 16.5v4M12.5 16.5v4"/>',
 };
 const icon = (name, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ''}</svg>`;
 const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -79,7 +82,7 @@ function dayLabel(time) {
 // Builds
 const STATUS = {
   queued: ['Queued', 'clock'], running: ['Building', 'spinner'], cancelling: ['Cancelling', 'spinner'],
-  success: ['Finished', 'check'], failed: ['Failed', 'cross'], cancelled: ['Cancelled', 'ban'],
+  success: ['Finished', 'check'], failed: ['Failed', 'cross'], cancelled: ['Cancelled', 'ban'], skipped: ['Reused', 'skip'],
 };
 const PHASES = {
   SETUP: 'Setup', SETUP_WORKINGDIR: 'Prepare work folder', START_BUILD: 'Start build', PREPARE_PROJECT: 'Prepare project',
@@ -88,19 +91,34 @@ const PHASES = {
   RESTORE_CACHE: 'Restore cache', INSTALL_PODS: 'Install pods', CALCULATE_EXPO_UPDATES_RUNTIME_VERSION: 'Runtime version',
   CONFIGURE_EXPO_UPDATES: 'Configure updates', CONFIGURE_XCODE_PROJECT: 'Configure Xcode', RUN_FASTLANE: 'Compile and archive',
   PREPARE_ARTIFACTS: 'Prepare artifacts', SAVE_CACHE: 'Save cache', UPLOAD_APPLICATION_ARCHIVE: 'Package IPA',
-  CLEAN_UP_CREDENTIALS: 'Clean up credentials', COMPLETE_BUILD: 'Complete build', SUBMIT: 'Upload to TestFlight',
+  CLEAN_UP_CREDENTIALS: 'Clean up credentials', COMPLETE_BUILD: 'Complete build', SUBMIT: 'Upload to the store', RUN_GRADLEW: 'Gradle build',
 };
 const phaseName = (name) => PHASES[name] ?? `${name.charAt(0)}${name.slice(1).toLowerCase().replace(/_/g, ' ')}`;
 const active = (build) => ['queued', 'running', 'cancelling'].includes(build.status);
-const store = (build) => build.distribution === 'store' || build.action === 'testflight';
+// Uploads were 'testflight' before Android, and are 'submit' now.
+const submits = (build) => build.action === 'submit' || build.action === 'testflight';
+const storeName = (platform) => (platform === 'android' ? 'Google Play' : 'TestFlight');
+const store = (build) => build.distribution === 'store' || submits(build);
 const short = (build) => build.commit?.short ?? '';
 const refOf = (build) => build.ref ?? '';
 const subject = (build) => build.commit?.subject || 'Working copy';
 const took = (build) => (build.startedAt && build.finishedAt ? span(build.finishedAt - build.startedAt) : '');
-const TRIGGERS = { manual: 'Started by hand', push: 'Push to branch', rebuild: 'Rebuild' };
+const TRIGGERS = { manual: 'Started by hand', push: 'Push to branch', pr: 'Pull request', nightly: 'Nightly build', rebuild: 'Rebuild' };
+const triggerOf = (build) => (build.by?.name ? `${esc(build.by.name)}${build.trigger === 'rebuild' ? ' <span class="faint">(rebuild)</span>' : ''}` : esc(TRIGGERS[build.trigger] ?? 'Started by hand'));
+const kindOf = (build) => (submits(build) ? storeName(build.platform) : build.profile);
+const platformName = (build) => (build.platform === 'android' ? 'Android' : build.simulator ? 'iOS Simulator' : 'iOS');
+const FILE_KINDS = { 'app.ipa': 'IPA', 'app.apk': 'APK', 'app.aab': 'AAB', 'app.tar.gz': '.tar.gz' };
+const fileKind = (build) => FILE_KINDS[build.artifact ?? 'app.ipa'];
+// A build's own file is on this Mac: reused builds point at the earlier build instead.
+const hasFile = (build) => Boolean(build.ipaBytes && !build.expired && (build.status === 'success' || (build.status === 'skipped' && !build.reusedFrom)));
+const fixHtml = (text) => esc(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+const RULE_KINDS = { push: 'On every push', pr: 'Pull requests', nightly: 'Every night' };
+const ruleTitle = (rule) => ((rule.on ?? 'push') === 'pr' ? 'Each pull request' : rule.on === 'nightly' ? `${esc(rule.branch)} every night at ${esc(rule.at)}` : `${esc(rule.branch)} on every push`);
+const ruleDetail = (rule) => `${rule.platform === 'android' ? 'Android' : 'iOS'} · ${esc(rule.profile)}${rule.submit ? ` · then ${storeName(rule.platform)}` : ''}${rule.skipUnchanged ? ' · reuses unchanged builds' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ''}`;
 const statusIcon = (status) => `<span class="st ${status}" role="img" aria-label="${STATUS[status][0]}">${icon(STATUS[status][1])}</span>`;
 const badge = (status) => `<span class="badge ${status}">${STATUS[status][0]}</span>`;
-const profileTag = (build) => (build.action === 'testflight' ? `<span class="tag store">${icon('send')}TestFlight</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
+const profileTag = (build) => (submits(build) ? `<span class="tag store">${icon('send')}${storeName(build.platform)}</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
+const platformTag = (build) => (build.platform === 'android' ? '<span class="tag">Android</span>' : build.simulator ? '<span class="tag">Simulator</span>' : '');
 
 // Project avatars: the app icon when the server found one in app.json, else a monogram on a gradient from the name.
 const PALETTE = [['#8b8af5', '#5b5bd6'], ['#62b4ff', '#2f6fe0'], ['#48d6ac', '#0f9d79'], ['#ffbd59', '#f07c1d'], ['#ff86ad', '#dd4579'], ['#bf97ff', '#7d4fe0'], ['#6fd6ec', '#1a93b8'], ['#a3abbd', '#5d6577']];
@@ -140,6 +158,12 @@ function toast(text) {
   if (!text) { box?.remove(); return; }
   if (!box) { box = document.createElement('div'); box.className = 'toast'; box.setAttribute('role', 'status'); document.body.append(box); }
   box.innerHTML = `${icon('spinner', 'sm')}${esc(text)}`;
+}
+function flash(text, bad = false) {
+  const box = document.createElement('div');
+  box.className = `toast ${bad ? 'bad' : ''}`; box.setAttribute('role', 'status'); box.textContent = text;
+  document.body.append(box);
+  setTimeout(() => box.remove(), 4000);
 }
 const machineName = () => shell.system?.machine?.name || 'this Mac';
 const expoCache = new Map();
@@ -231,7 +255,7 @@ function buildRow(build, { project = true } = {}) {
   return `<a class="row build" href="#/build/${esc(build.id)}">
     ${statusIcon(build.status)}
     <span class="main"><span class="title">${esc(subject(build))}</span><span class="meta">${project ? `<span>${avatar(build.project, 'xs')}${esc(build.project)}</span><span class="sep"></span>` : ''}<span class="trunc">${esc(refOf(build))}</span><span class="sep"></span><span class="mono">${esc(short(build) || 'local')}</span>${build.source === 'working' ? '<span class="tag">local</span>' : ''}</span></span>
-    <span class="end">${profileTag(build)}<span class="dur num">${esc(took(build))}</span><span class="when">${ago(build.createdAt)}</span></span>
+    <span class="end">${platformTag(build)}${profileTag(build)}<span class="dur num">${esc(took(build))}</span><span class="when">${ago(build.createdAt)}</span></span>
   </a>`;
 }
 function dayGroups(builds, row = (build) => buildRow(build)) {
@@ -273,7 +297,7 @@ function liveCard(builds) {
   const running = builds.find((build) => ['running', 'cancelling'].includes(build.status));
   const queued = builds.filter((build) => build.status === 'queued').reverse();
   if (!running && !queued.length) return '';
-  const kind = (build) => (build.action === 'testflight' ? 'TestFlight' : build.profile);
+  const kind = (build) => `${build.platform === 'android' ? 'Android · ' : ''}${kindOf(build)}`;
   return `<section class="card live">
     <div class="live-head"><span class="led busy"></span><b>${running ? 'Building now' : 'Up next'}</b><span>on ${esc(machineName())}</span></div>
     ${running ? `<a class="live-main" href="#/build/${esc(running.id)}">
@@ -330,7 +354,7 @@ const minutes = (value, axis) => (axis ? `${Math.round(value)}m` : span(value * 
 const prefs = { filter: 'all', query: '', scope: 'all', projectFilter: 'all' };
 const FILTERS = { all: 'All', active: 'Active', failed: 'Failed', testflight: 'TestFlight', dev: 'Development' };
 const matches = (filter) => (build) => filter === 'all' || (filter === 'active' && active(build)) || (filter === 'failed' && build.status === 'failed')
-  || (filter === 'testflight' && build.action === 'testflight') || (filter === 'dev' && !store(build)) || (filter === 'store' && store(build));
+  || (filter === 'testflight' && submits(build)) || (filter === 'dev' && !store(build)) || (filter === 'store' && store(build));
 
 async function buildsPage() {
   let { builds } = await get('/api/builds');
@@ -338,7 +362,7 @@ async function buildsPage() {
     ${header('Builds', `Every build on ${esc(machineName())}, newest first.`, `<a class="btn primary" href="#/new">${icon('plus')}New build</a>`)}
     <div id="install"></div><div id="live"></div>
     <div class="toolbar"><label class="search">${icon('search')}<input id="q" type="search" placeholder="Search commits, branches, people" aria-label="Search builds" value="${esc(prefs.query)}"></label>
-      <div class="seg" role="group" aria-label="Show">${Object.entries(FILTERS).map(([key, label]) => `<button data-filter="${key}" class="${prefs.filter === key ? 'on' : ''}" aria-pressed="${prefs.filter === key}">${label}</button>`).join('')}</div></div>
+      <div class="seg" role="group" aria-label="Show">${Object.entries(FILTERS).map(([key, label]) => `<button data-filter="${key}" class="${prefs.filter === key ? 'on' : ''}" aria-pressed="${prefs.filter === key}">${key === 'testflight' && builds.some((build) => build.platform === 'android') ? 'Store uploads' : label}</button>`).join('')}</div></div>
     <div id="list"></div>`;
   const draw = () => {
     updateLive($('#live'), builds);
@@ -411,14 +435,20 @@ async function buildPage(id) {
 }
 const installUrl = (build) => `itms-services://?action=download-manifest&url=${encodeURIComponent(`${location.origin}/ota/${build.id}/manifest.plist`)}`;
 function buildHead(build) {
-  const hasIpa = build.ipaBytes && !build.expired;
+  const file = hasFile(build);
+  const apk = build.platform === 'android' && build.installable;
+  const primary = !file ? '' : build.simulator ? `<button class="btn primary" data-simulator="${esc(build.id)}">${icon('phone')}Open in Simulator</button>`
+    : apk ? `<a class="btn primary" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Install APK</a>`
+    : build.installable ? `<a class="btn primary" href="${installUrl(build)}">${icon('phone')}Install</a>` : '';
   const actions = [
-    build.installable && hasIpa ? `<a class="btn primary" href="${installUrl(build)}">${icon('phone')}Install</a>` : '',
-    hasIpa ? `<a class="btn" href="/api/builds/${esc(build.id)}/app.ipa">${icon('download')}IPA</a>` : '',
+    primary,
+    build.reusedFrom ? `<a class="btn primary" href="#/build/${esc(build.reusedFrom)}">${icon('right')}Open the reused build</a>` : '',
+    file && !apk ? `<a class="btn" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}${fileKind(build)}</a>` : '',
     active(build) ? `<button class="btn danger" data-cancel="${esc(build.id)}" ${build.status === 'cancelling' ? 'disabled' : ''}>${icon('ban')}Cancel</button>` : `<button class="btn" data-rebuild="${esc(build.id)}">${icon('rebuild')}Rebuild</button>`,
   ].join('');
+  const person = build.by?.name ?? build.commit?.author;
   return `<header class="head"><div class="bhead">${avatar(build.project, 'lg')}<div><h1>${esc(subject(build))}</h1>
-    <div class="facts">${badge(build.status)}${profileTag(build)}${took(build) ? `<span>${icon('timer', 'sm')}${esc(took(build))}</span>` : ''}<span>${icon('clock', 'sm')}${ago(build.createdAt)}</span>${build.commit?.author ? `<span>${icon('user', 'sm')}${esc(build.commit.author)}</span>` : ''}</div></div></div>
+    <div class="facts">${badge(build.status)}${platformTag(build)}${profileTag(build)}${took(build) ? `<span>${icon('timer', 'sm')}${esc(took(build))}</span>` : ''}<span>${icon('clock', 'sm')}${ago(build.createdAt)}</span>${person ? `<span>${icon('user', 'sm')}${esc(person)}</span>` : ''}</div></div></div>
     <div class="actions">${actions}</div></header>`;
 }
 function buildAlert(build) {
@@ -429,38 +459,59 @@ function buildAlert(build) {
   if (build.status === 'queued') return `<div class="callout info" style="margin-bottom:20px">${icon('clock')}<div><b>Waiting for the build ahead of it</b><span class="muted">Builds run one at a time and use the whole Mac.</span></div></div>`;
   if (build.status === 'failed') {
     const phase = build.phases?.at(-1)?.name;
-    return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}</b>${build.reason ? `<code>${esc(build.reason)}</code>` : ''}<button class="btn sm" data-show-failure>Show the log</button></div></div>`;
+    return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}</b>
+      ${build.hint ? `<p class="fix"><strong>Likely cause: ${esc(build.hint.title)}.</strong> ${fixHtml(build.hint.fix)}</p>` : ''}
+      ${build.reason ? `<code>${esc(build.reason)}</code>` : ''}<button class="btn sm" data-show-failure>Show the log</button></div></div>`;
   }
-  if (build.submission) return `<div class="callout info" style="margin-bottom:20px">${icon('send')}<div><b>Uploaded to App Store Connect</b><span class="muted">Apple processes the build before it shows up in TestFlight. </span><a class="link" href="${esc(build.submission)}">View the submission</a></div></div>`;
+  if (build.status === 'skipped') {
+    return `<div class="callout info" style="margin-bottom:20px">${icon('skip')}<div><b>No new build needed</b><span class="muted">The native code is the same as in ${build.reusedFrom ? `<a class="link" href="#/build/${esc(build.reusedFrom)}">an earlier build</a>, so that build was reused` : 'an earlier build, so its file was reused'}. A development build loads JavaScript from Metro, so it only needs rebuilding when native code changes.</span></div></div>`;
+  }
+  if (build.submission) return `<div class="callout info" style="margin-bottom:20px">${icon('send')}<div><b>Uploaded to ${build.platform === 'android' ? 'Google Play' : 'App Store Connect'}</b><span class="muted">${build.platform === 'android' ? 'Google' : 'Apple'} processes the build before testers can install it. </span><a class="link" href="${esc(build.submission)}">View the submission</a></div></div>`;
   return '';
+}
+function sizeChange(build) {
+  if (!build.sizeBefore || !build.ipaBytes) return '';
+  const change = build.ipaBytes - build.sizeBefore;
+  if (Math.abs(change) < 52429) return ' <span class="faint">· same as before</span>';
+  const percent = (change / build.sizeBefore) * 100;
+  return ` <span class="${percent > 5 ? 'warn' : 'faint'}" title="Compared with the previous ${esc(build.profile)} build">· ${change > 0 ? '+' : '−'}${mb(Math.abs(change))}</span>`;
 }
 function buildTop(build) {
   const commit = build.commit;
-  const hasIpa = build.ipaBytes && !build.expired;
+  const file = hasFile(build);
   const days = build.signing?.expires ? Math.round((new Date(build.signing.expires) - Date.now()) / DAY) : null;
   // One even grid, the way EAS lays out a build's details: what was built, from where, and when.
-  const sections = `<section class="card details"><div class="card-head"><h2>${icon('layers')}Details</h2>${build.app ? `<span class="faint mono">${esc(build.app.id)}</span>` : ''}</div><div class="card-body">${kv([
-    ['Profile', esc(build.profile)], ['Distribution', build.distribution === 'store' ? 'App Store' : 'Internal'],
-    ['Version', build.app ? `${esc(build.app.version)} <span class="faint">(${esc(build.app.number)})</span>` : ''], ['Channel', esc(build.channel)],
+  const details = `<section class="card details"><div class="card-head"><h2>${icon('layers')}Details</h2>${build.app ? `<span class="faint mono">${esc(build.app.id)}</span>` : ''}</div><div class="card-body">${kv([
+    ['Platform', platformName(build)], ['Profile', esc(build.profile)], ['Distribution', build.distribution === 'store' ? 'Store' : 'Internal'],
+    ['Version', build.app ? `${esc(build.app.version)} <span class="faint">(${esc(build.app.number)})</span>` : ''],
     ['Branch', `${esc(refOf(build))}${build.source === 'working' ? ' <span class="tag">local</span>' : ''}`],
     ['Commit', commit?.url ? `<a class="link mono" href="${esc(commit.url)}">${esc(commit.short)}</a>` : `<span class="mono">${esc(short(build) || '—')}</span>`],
     ['Pull request', build.pr ? `<a class="link" href="${esc(build.pr.url)}">#${esc(build.pr.number)}</a> <span class="faint">${esc(build.pr.title ?? '')}</span>` : ''],
     ['Checks', build.repo && commit?.hash ? '<span id="checks" class="faint">Loading…</span>' : ''],
-    ['Triggered by', esc(TRIGGERS[build.trigger] ?? 'Started by hand')], ['Created', when(build.createdAt)],
+    ['Started by', triggerOf(build)], ['Created', when(build.createdAt)],
     ['Waited', build.startedAt ? span(build.startedAt - build.createdAt) : ''], ['Took', active(build) && build.startedAt ? `<span class="num" data-since="${build.startedAt}"></span>` : esc(took(build))],
-    ['Runtime', build.runtime && !build.runtime.startsWith('file:') ? `<span class="mono">${esc(build.runtime.slice(0, 12))}</span>` : ''],
-    ['IPA', hasIpa ? mb(build.ipaBytes) : build.expired ? '<span class="faint">Removed to save space</span>' : ''],
+    ['Size', build.ipaBytes && !build.expired ? `${mb(build.ipaBytes)}${sizeChange(build)}` : build.expired ? '<span class="faint">Removed to save space</span>' : ''],
+    ['Channel', esc(build.channel)], ['Runtime', build.runtime && !build.runtime.startsWith('file:') ? `<span class="mono">${esc(build.runtime.slice(0, 12))}</span>` : ''],
+    ['Native fingerprint', build.fingerprint ? `<span class="mono" title="${esc(build.fingerprint)}">${esc(build.fingerprint.slice(0, 12))}</span>` : ''],
     ['Signing expires', days !== null ? `<span class="${days < 30 ? 'warn' : ''}">${day(build.signing.expires)} · ${days}d</span>` : ''],
     ['Uncommitted', build.dirty ? `<span class="warn">${plural(build.dirty, 'file')} included</span>` : ''],
   ], 'kv wide')}</div></section>`;
+  const qr = `<img src="/api/builds/${esc(build.id)}/qr.svg" alt="QR code that opens this build on a phone"><p class="qr-note">Scan with a phone’s camera to open this page there.</p>`;
   let aside = '';
-  if (build.installable && hasIpa) {
-    aside = card('Install', 'phone', `<div class="install"><img src="/api/builds/${esc(build.id)}/qr.svg" alt="QR code that opens this build on an iPhone"><p class="qr-note">Scan with an iPhone camera to open this page there.</p>
-      <a class="btn primary block" href="${installUrl(build)}">${icon('phone')}Install on iPhone</a><p>Open in Safari on a device in this build’s provisioning profile${build.signing ? ` (${plural(build.signing.devices, 'device')})` : ''}.</p></div>`);
-  } else if (hasIpa) {
-    aside = card('App Store build', 'send', `<div class="install"><p>Store builds install through TestFlight once Apple has processed them.</p><a class="btn block" href="/api/builds/${esc(build.id)}/app.ipa">${icon('download')}Download IPA</a></div>`);
+  if (!file) aside = '';
+  else if (build.simulator) {
+    aside = card('Simulator', 'phone', `<div class="install"><p>Opens the app in the Simulator on ${esc(machineName())}, starting an iPhone simulator if none is running.</p>
+      <button class="btn primary block" data-simulator="${esc(build.id)}">${icon('phone')}Open in Simulator</button><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download the app</a></div>`);
+  } else if (build.platform === 'android' && build.installable) {
+    aside = card('Install on Android', 'phone', `<div class="install">${qr}<a class="btn primary block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download APK</a>
+      <p>On the phone, open this page, download the APK and allow installs from your browser when asked.</p></div>`);
+  } else if (build.installable) {
+    aside = card('Install', 'phone', `<div class="install">${qr}<a class="btn primary block" href="${installUrl(build)}">${icon('phone')}Install on iPhone</a>
+      <p>Open in Safari on a device in this build’s provisioning profile${build.signing ? ` (${plural(build.signing.devices, 'device')})` : ''}.</p></div>`);
+  } else {
+    aside = card('Store build', 'send', `<div class="install"><p>Store builds reach testers through ${storeName(build.platform)} once ${build.platform === 'android' ? 'Google' : 'Apple'} has processed them.</p><a class="btn block" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}Download ${fileKind(build)}</a></div>`);
   }
-  return aside ? `<div class="cols main-side">${sections}<div class="stack">${aside}</div></div>` : sections;
+  return aside ? `<div class="cols main-side">${details}<div class="stack">${aside}</div></div>` : details;
 }
 function loadChecks(build) {
   if (!build.repo || !build.commit?.hash) return;
@@ -573,7 +624,7 @@ const SECTION_LEDES = {
   channels: () => 'Where over-the-air updates go, from Expo.',
   signing: () => 'Provisioning profiles from your latest builds, and the devices registered with Apple.',
   environment: () => 'Variable names on Expo for each environment. Values never reach this page.',
-  automation: () => 'Build a branch automatically each time it’s pushed. GitHub is checked every minute.',
+  automation: () => 'Build automatically on every push, for each pull request, or every night. GitHub is checked every minute.',
 };
 function withExpo(name, box, render) {
   expoOf(name).then((expo) => { if (box.isConnected) box.innerHTML = render(expo); })
@@ -606,8 +657,8 @@ const PROJECT_SECTIONS = {
             <dl class="stats3" style="border-top:1px solid var(--line)"><div><dt>Passed</dt><dd>${data.stats.total ? `${Math.round((data.stats.passed / data.stats.total) * 100)}<small>%</small>` : '—'}</dd></div><div><dt>Typical</dt><dd>${data.stats.median ? `${Math.round(data.stats.median / 60000)}<small>min</small>` : '—'}</dd></div><div><dt>This week</dt><dd>${week}</dd></div></dl>`)}
           ${card('Signing', 'shield', kv([['Development profile', expiry(data.signing)], ['Devices', data.signing ? String(data.signing.devices) : '<span class="faint">—</span>'], ['App Store profile', expiry(data.storeSigning)]], 'list-kv'), more(`#/p/${esc(name)}/signing`, 'Details'))}
           ${card('Working copy', 'mac', kv([['Branch', esc(data.branch || 'detached')], ['Commit', `<span class="mono">${esc(data.commit)}</span>`], ['Changes', data.dirty ? `<span class="warn">${plural(data.dirty, 'file')}</span>` : 'Clean'], ['GitHub', data.behind ? `<span class="warn">${data.behind} behind</span>` : 'Up to date']], 'list-kv'))}
-          ${card('Build on push', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<a class="row compact" href="#/p/${esc(name)}/automation">${icon('branch', 'sm faint')}<span class="main"><span class="title">${esc(rule.branch)}</span><span class="meta">${esc(rule.profile)}${rule.submit ? ' · then TestFlight' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ''}</span></span><span class="led ${rule.error ? '' : 'idle'}"></span></a>`).join('')}</div>`
-            : `<div class="card-body muted">Off. Build a branch automatically each time it’s pushed.</div>`, more(`#/p/${esc(name)}/automation`, 'Manage'))}
+          ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<a class="row compact" href="#/p/${esc(name)}/automation">${icon(rule.on === 'pr' ? 'pr' : rule.on === 'nightly' ? 'clock' : 'branch', 'sm faint')}<span class="main"><span class="title">${ruleTitle(rule)}</span><span class="meta">${ruleDetail(rule)}</span></span><span class="led ${rule.error ? '' : 'idle'}"></span></a>`).join('')}</div>`
+            : '<div class="card-body muted">Off. Build on every push, for each pull request, or every night.</div>', more(`#/p/${esc(name)}/automation`, 'Manage'))}
           ${card('Releases', 'send', `<div id="releases">${skeleton(3)}</div>`, more(`#/p/${esc(name)}/submissions`, 'Submissions'))}
         </div>
       </div>`;
@@ -641,7 +692,7 @@ const PROJECT_SECTIONS = {
       document.querySelectorAll('[data-view]').forEach((item) => item.classList.toggle('on', item === button));
       draw();
     };
-    withExpo(name, $('#cloud'), (expo) => (expo.cloud.length ? `<div class="rows">${expo.cloud.slice(0, 8).map((item) => `<div class="row compact">${expoIcon(item.status)}<span class="main"><span class="title">${esc(item.profile)}</span><span class="meta">${esc(item.version ?? '')} (${esc(item.number ?? '')})</span></span><span class="end"><span class="when">${ago(new Date(item.createdAt).getTime())}</span></span></div>`).join('')}</div>`
+    withExpo(name, $('#cloud'), (expo) => (expo.cloud.length ? `<div class="rows">${expo.cloud.slice(0, 8).map((item) => `<div class="row compact">${expoIcon(item.status)}<span class="main"><span class="title">${esc(item.profile)}${item.platform === 'android' ? ' <span class="tag">Android</span>' : ''}</span><span class="meta">${esc(item.version ?? '')} (${esc(item.number ?? '')})</span></span><span class="end"><span class="when">${ago(new Date(item.createdAt).getTime())}</span></span></div>`).join('')}</div>`
       : empty('cloudoff', 'No cloud builds', 'Every build of this app has run on a Mac.')));
     if (data.builds.some(active)) every(3000, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(name)}`); data.builds = fresh.builds; updateLive($('#plive'), fresh.builds); draw(); });
   },
@@ -650,13 +701,13 @@ const PROJECT_SECTIONS = {
       ${data.refreshing ? '<p class="hint">Checking GitHub for new branches…</p>' : ''}`;
   },
   async submissions(data, box) {
-    const uploads = data.builds.filter((build) => build.action === 'testflight');
+    const uploads = data.builds.filter(submits);
     box.innerHTML = `<div class="cols two">
-      ${card('App Store Connect', 'send', `<div id="subs">${skeleton(3)}</div>`)}
-      ${card('Uploads from this Mac', 'mac', uploads.length ? `<div class="rows">${uploads.slice(0, 10).map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('send', 'No TestFlight builds yet', 'Start a production build with “Upload to TestFlight” on.'))}
+      ${card('Store submissions', 'send', `<div id="subs">${skeleton(3)}</div>`)}
+      ${card('Uploads from this Mac', 'mac', uploads.length ? `<div class="rows">${uploads.slice(0, 10).map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('send', 'No store uploads yet', 'Start a production build with “Upload to TestFlight” or “Upload to Google Play” on.'))}
     </div>`;
-    withExpo(data.name, $('#subs'), (expo) => (expo.submissions.length ? `<div class="rows">${expo.submissions.map((item) => `<div class="row">${expoIcon(item.status)}<span class="main"><span class="title">${esc(item.status.charAt(0) + item.status.slice(1).toLowerCase().replace(/_/g, ' '))}</span><span class="meta">App Store Connect app <span class="mono">${esc(item.ascApp ?? '—')}</span></span></span><span class="end"><span class="when">${ago(new Date(item.createdAt).getTime())}</span></span></div>`).join('')}</div>${expo.url ? `<div class="card-foot"><a class="link" href="${esc(expo.url)}/submissions">All submissions on expo.dev</a></div>` : ''}`
-      : empty('send', 'No submissions yet', 'Upload a production build to TestFlight when it’s ready.')));
+    withExpo(data.name, $('#subs'), (expo) => (expo.submissions.length ? `<div class="rows">${expo.submissions.map((item) => `<div class="row">${expoIcon(item.status)}<span class="main"><span class="title">${esc(item.status.charAt(0) + item.status.slice(1).toLowerCase().replace(/_/g, ' '))}</span><span class="meta">${item.platform === 'android' ? 'Google Play' : `App Store Connect app <span class="mono">${esc(item.ascApp ?? '—')}</span>`}</span></span><span class="end"><span class="when">${ago(new Date(item.createdAt).getTime())}</span></span></div>`).join('')}</div>${expo.url ? `<div class="card-foot"><a class="link" href="${esc(expo.url)}/submissions">All submissions on expo.dev</a></div>` : ''}`
+      : empty('send', 'No submissions yet', 'Upload a production build to the store when it’s ready.')));
   },
   async channels(data, box) {
     box.innerHTML = `<div class="card" id="chan">${skeleton(3)}</div><p class="hint">Each build profile in eas.json names a channel; expo-updates sends a build made with it the updates on that channel’s branch.</p>`;
@@ -685,27 +736,54 @@ const PROJECT_SECTIONS = {
   async automation(data, box) {
     const name = data.name;
     const branches = data.branches.map((branch) => branch.name);
+    const NOTES = {
+      push: 'Builds the branch each time it’s pushed, from the next push on. A newer push replaces a build that hasn’t started.',
+      pr: 'Builds each pull request from this repository when it’s next pushed to. Pull requests from forks are never built: their code would run on this Mac.',
+      nightly: 'Builds the branch once a day at this time on the Mac’s clock, and only when it has new commits.',
+    };
+    const ruleIcon = (rule) => icon(rule.on === 'pr' ? 'pr' : rule.on === 'nightly' ? 'clock' : 'branch', 'sm faint');
     box.innerHTML = `<div class="cols main-side"><div class="stack">
-        ${card('Rules', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<label class="toggle"><span><b>${esc(rule.branch)}</b><small>${esc(rule.profile)}${rule.submit ? ', then TestFlight' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ` · last built <span class="mono">${esc((rule.sha ?? '').slice(0, 7))}</span>`}</small></span><input class="switch" type="checkbox" checked data-rule="${esc(rule.branch)}" aria-label="Build ${esc(rule.branch)} on push"></label>`).join('')}</div>`
-          : empty('bolt', 'No rules yet', 'Add one to build a branch whenever it’s pushed.'))}
+        ${card('Rules', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<label class="toggle"><span><b>${ruleIcon(rule)} ${ruleTitle(rule)}</b><small>${ruleDetail(rule)}${!rule.error && rule.sha ? ` · last built <span class="mono">${esc(rule.sha.slice(0, 7))}</span>` : ''}</small></span><input class="switch" type="checkbox" checked data-rule-on="${esc(rule.on ?? 'push')}" data-rule-branch="${esc(rule.branch ?? '')}" aria-label="${esc(ruleTitle(rule))}"></label>`).join('')}</div>`
+          : empty('bolt', 'No rules yet', 'Add one to build without starting each build yourself.'))}
       </div><div class="stack">
         ${card('Add a rule', 'plus', `<form class="card-body form" id="rule">
-          <label class="field"><span>Branch</span><select class="select" name="branch">${branches.map((branch) => `<option ${branch === 'main' ? 'selected' : ''}>${esc(branch)}</option>`).join('')}</select></label>
-          <label class="field"><span>Profile</span><select class="select" name="profile">${data.profiles.map((item) => `<option value="${esc(item.name)}" data-store="${item.distribution === 'store'}">${esc(item.name)} · ${item.distribution === 'store' ? 'App Store' : 'internal'}</option>`).join('')}</select></label>
-          <label class="toggle" style="padding:0"><span><b>Upload to TestFlight</b><small>App Store profiles only</small></span><input class="switch" type="checkbox" name="submit"></label>
-          <button class="btn primary" ${branches.length ? '' : 'disabled'}>${icon('bolt')}Build on push</button><p class="hint bad" id="rule-error"></p></form>`)}
+          <label class="field"><span>When</span><select class="select" name="when">${Object.entries(RULE_KINDS).map(([key, label]) => `<option value="${key}">${label}</option>`).join('')}</select></label>
+          <label class="field" id="rule-branch"><span>Branch</span><select class="select" name="branch">${branches.map((branch) => `<option ${branch === 'main' ? 'selected' : ''}>${esc(branch)}</option>`).join('')}</select></label>
+          <label class="field" id="rule-at" hidden><span>Time</span><input class="input" type="time" name="at" value="02:00"></label>
+          <label class="field"><span>Platform</span><select class="select" name="platform"><option value="ios">iOS</option><option value="android">Android</option></select></label>
+          <label class="field"><span>Profile</span><select class="select" name="profile">${data.profiles.map((item) => `<option value="${esc(item.name)}" ${item.name === 'development' ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
+          <label class="toggle" style="padding:0"><span><b id="rule-store">Upload to TestFlight</b><small>Store profiles only</small></span><input class="switch" type="checkbox" name="submit"></label>
+          <label class="toggle" style="padding:0"><span><b>Reuse unchanged builds</b><small>Skip the build when the native code hasn’t changed. For development builds.</small></span><input class="switch" type="checkbox" name="skip"></label>
+          <p class="hint" id="rule-note">${NOTES.push}</p>
+          <button class="btn primary">${icon('bolt')}Add rule</button><p class="hint bad" id="rule-error"></p></form>`)}
       </div></div>`;
     const form = $('#rule');
-    const sync = () => { const isStore = form.profile.selectedOptions[0]?.dataset.store === 'true'; form.submit.disabled = !isStore; if (!isStore) form.submit.checked = false; };
-    form.profile.onchange = sync; sync();
+    let when = 'push';
+    const sync = () => {
+      const profile = data.profiles.find((item) => item.name === form.profile.value);
+      const target = profile?.[form.platform.value];
+      const storeProfile = profile?.distribution === 'store' && !target?.simulator;
+      form.submit.disabled = !storeProfile;
+      if (!storeProfile) form.submit.checked = false;
+      form.skip.disabled = form.submit.checked;
+      if (form.submit.checked) form.skip.checked = false;
+      $('#rule-store').textContent = `Upload to ${storeName(form.platform.value)}`;
+      $('#rule-branch').hidden = when === 'pr';
+      $('#rule-at').hidden = when !== 'nightly';
+      $('#rule-note').textContent = NOTES[when];
+    };
+    form.onchange = () => { when = form.when.value; sync(); };
+    form.profile.value = data.profiles.find((item) => item.developmentClient)?.name ?? form.profile.value;
+    form.skip.checked = Boolean(data.profiles.find((item) => item.name === form.profile.value)?.developmentClient);
+    sync();
     form.onsubmit = async (event) => {
       event.preventDefault();
-      const result = await post('/api/triggers', { project: name, branch: form.branch.value, profile: form.profile.value, submit: form.submit.checked, enabled: true });
+      const result = await post('/api/triggers', { project: name, on: when, branch: form.branch.value, at: form.at.value, profile: form.profile.value, platform: form.platform.value, submit: form.submit.checked, skipUnchanged: form.skip.checked, enabled: true });
       if (result.error) $('#rule-error').textContent = result.error; else route();
     };
     box.onchange = async (event) => {
-      if (!event.target.matches('[data-rule]')) return;
-      await post('/api/triggers', { project: name, branch: event.target.dataset.rule, enabled: false });
+      if (!event.target.matches('[data-rule-on]')) return;
+      await post('/api/triggers', { project: name, on: event.target.dataset.ruleOn, branch: event.target.dataset.ruleBranch, enabled: false });
       route();
     };
   },
@@ -724,15 +802,25 @@ async function newBuildPage({ name, branch }) {
   const form = {
     source: branch === '' ? 'working' : 'branch',
     branch: branch || data.branches.find((item) => item.name === 'main')?.name || data.branches[0]?.name || '',
-    commit: '', profile: data.profiles.find((item) => item.name === 'development')?.name ?? data.profiles[0]?.name, submit: false,
+    commit: '', platform: 'ios', profile: data.profiles.find((item) => item.name === 'development')?.name ?? data.profiles[0]?.name, submit: false, skip: null,
   };
   if (!form.branch) form.source = 'working';
   let commits = [];
   const profileOf = () => data.profiles.find((item) => item.name === form.profile);
-  const isStore = () => profileOf()?.distribution === 'store';
+  const target = () => profileOf()?.[form.platform] ?? { artifact: 'ipa', simulator: false };
+  const isStore = () => profileOf()?.distribution === 'store' && !target().simulator;
+  // Development and simulator builds load JavaScript from Metro, so reusing one with the same native code loses nothing.
+  const devLike = () => Boolean(profileOf()?.developmentClient || target().simulator);
+  const skip = () => (form.skip ?? devLike()) && !form.submit;
+  const pushRule = () => data.triggers.find((item) => (item.on ?? 'push') === 'push' && item.branch === form.branch);
   const typical = () => {
-    const times = data.builds.filter((build) => build.status === 'success' && build.profile === form.profile && build.startedAt).map((build) => build.finishedAt - build.startedAt);
+    const times = data.builds.filter((build) => build.status === 'success' && build.profile === form.profile && (build.platform ?? 'ios') === form.platform && build.startedAt).map((build) => build.finishedAt - build.startedAt);
     return times.length ? median(times) : null;
+  };
+  const describeProfile = (item) => {
+    const kind = item[form.platform];
+    if (form.platform === 'android') return `${kind.artifact.toUpperCase()} · ${item.distribution === 'store' ? 'Google Play' : 'Internal'}`;
+    return kind.simulator ? 'Simulator' : item.distribution === 'store' ? 'App Store' : 'Internal';
   };
   app.innerHTML = `<nav class="crumbs"><a href="#/projects">Projects</a><span class="slash">/</span><a href="#/p/${esc(name)}">${avatar(name, 'xs')}${esc(name)}</a><span class="slash">/</span><span>New build</span></nav>
     ${header('New build', `Build ${esc(name)} on ${esc(machineName())} with <span class="mono">eas build --local</span>.`)}
@@ -740,8 +828,11 @@ async function newBuildPage({ name, branch }) {
       ${card('Source', 'branch', `<div class="card-body">
         <div class="seg" role="group" aria-label="Source"><button type="button" data-source="branch">GitHub branch</button><button type="button" data-source="working">This Mac’s working copy</button></div>
         <div id="src"></div></div>`)}
-      ${card('Profile', 'layers', `<div class="card-body"><div class="choices">${data.profiles.map((item) => `<label class="choice"><input type="radio" name="profile" value="${esc(item.name)}" ${item.name === form.profile ? 'checked' : ''}><b>${esc(item.name)}</b><small>${item.distribution === 'store' ? 'App Store' : 'Internal'}${item.channel ? ` · ${esc(item.channel)} channel` : ''}</small></label>`).join('')}</div></div>`)}
-      ${card('After the build', 'send', `<div class="rows"><label class="toggle"><span><b>Upload to TestFlight</b><small id="tf-note"></small></span><input class="switch" type="checkbox" id="submit"></label>
+      ${card('Platform and profile', 'layers', `<div class="card-body">
+        <div class="seg" role="group" aria-label="Platform"><button type="button" data-platform="ios">iOS</button><button type="button" data-platform="android">Android</button></div>
+        <div class="choices" id="profiles"></div></div>`)}
+      ${card('After the build', 'send', `<div class="rows"><label class="toggle"><span><b id="submit-label">Upload to TestFlight</b><small id="tf-note"></small></span><input class="switch" type="checkbox" id="submit"></label>
+        <label class="toggle"><span><b>Reuse it if the native code hasn’t changed</b><small id="skip-note"></small></span><input class="switch" type="checkbox" id="skip"></label>
         <label class="toggle"><span><b>Build on every push</b><small id="auto-note"></small></span><input class="switch" type="checkbox" id="auto"></label></div>`)}
     </form>
     <aside class="stack"><section class="card" id="sum"></section></aside></div>`;
@@ -750,7 +841,11 @@ async function newBuildPage({ name, branch }) {
     $('#src').innerHTML = form.source === 'branch'
       ? `<div class="form"><label class="field"><span>Branch</span><select class="select" id="branch">${data.branches.map((item) => `<option value="${esc(item.name)}" ${item.name === form.branch ? 'selected' : ''}>${esc(item.name)}${item.pr ? ` · #${esc(item.pr.number)}` : ''}</option>`).join('')}</select></label>
         <label class="field"><span>Commit</span><select class="select" id="commit">${commits.map((item, index) => `<option value="${index ? esc(item.hash) : ''}" ${(index ? item.hash : '') === form.commit ? 'selected' : ''}>${esc(item.short)} · ${esc(item.subject.slice(0, 60))}${index ? '' : ' (latest)'}</option>`).join('') || '<option>Loading…</option>'}</select><small>A clean checkout of the pushed commit: nothing uncommitted on this Mac goes in.</small></label></div>`
-      : `<p class="hint">Builds the project folder on this Mac as it is${data.dirty ? `, <span class="warn">including ${plural(data.dirty, 'uncommitted change')}</span>` : ''}. For TestFlight, prefer a pushed branch.</p>`;
+      : `<p class="hint">Builds the project folder on this Mac as it is${data.dirty ? `, <span class="warn">including ${plural(data.dirty, 'uncommitted change')}</span>` : ''}. For the store, prefer a pushed branch.</p>`;
+  };
+  const drawProfiles = () => {
+    document.querySelectorAll('[data-platform]').forEach((button) => button.classList.toggle('on', button.dataset.platform === form.platform));
+    $('#profiles').innerHTML = data.profiles.map((item) => `<label class="choice"><input type="radio" name="profile" value="${esc(item.name)}" ${item.name === form.profile ? 'checked' : ''}><b>${esc(item.name)}</b><small>${esc(describeProfile(item))}${item.channel ? ` · ${esc(item.channel)} channel` : ''}</small></label>`).join('');
   };
   const drawSummary = () => {
     const profile = profileOf();
@@ -759,17 +854,24 @@ async function newBuildPage({ name, branch }) {
     if (!isStore()) form.submit = false;
     $('#submit').disabled = !isStore();
     $('#submit').checked = form.submit;
-    $('#tf-note').textContent = isStore() ? 'Expo uploads the IPA to App Store Connect when the build is done.' : 'Pick an App Store profile to upload.';
-    const rule = data.triggers.find((item) => item.branch === form.branch);
+    $('#submit-label').textContent = `Upload to ${storeName(form.platform)}`;
+    $('#tf-note').textContent = isStore() ? `Expo uploads the build to ${form.platform === 'android' ? 'Google Play' : 'App Store Connect'} when it’s done.` : 'Pick a store profile to upload.';
+    $('#skip').disabled = form.submit;
+    $('#skip').checked = skip();
+    $('#skip-note').textContent = form.submit ? 'A store upload always needs a new build.'
+      : devLike() ? 'A development build loads JavaScript from Metro, so it only needs rebuilding when native code changes. macbuild compares native fingerprints.'
+        : 'This profile bundles your JavaScript into the app, so a reused build won’t have JavaScript changes.';
+    const rule = pushRule();
     $('#auto').disabled = form.source !== 'branch';
     $('#auto').checked = Boolean(rule) && form.source === 'branch';
-    $('#auto-note').innerHTML = form.source !== 'branch' ? 'Pushes only apply to GitHub branches.' : rule ? `On for ${esc(form.branch)}, using ${esc(rule.profile)}${rule.submit ? ', then TestFlight' : ''}.` : `Build ${esc(form.branch)} with this profile each time it’s pushed.`;
+    $('#auto-note').innerHTML = form.source !== 'branch' ? 'Pushes only apply to GitHub branches.' : rule ? `On for ${esc(form.branch)}: ${ruleDetail(rule)}.` : `Build ${esc(form.branch)} with these settings each time it’s pushed.`;
     $('#sum').innerHTML = `<div class="card-head"><h2>${avatar(name, 'sm')}${esc(name)}</h2><span class="faint">Summary</span></div>
       ${kv([
         ['Source', form.source === 'branch' ? esc(form.branch) : 'Working copy'],
         ['Commit', form.source === 'branch' ? (commit ? `<span class="mono">${esc(commit.short)}</span>${form.commit ? '' : ' <span class="faint">latest</span>'}` : '…') : `<span class="mono">${esc(data.commit)}</span>${data.dirty ? ' <span class="warn">+ changes</span>' : ''}`],
-        ['Profile', profile ? esc(profile.name) : '—'], ['Distribution', isStore() ? 'App Store' : 'Internal'],
-        ['Then', form.submit ? 'Upload to TestFlight' : 'Keep the IPA here'], ['Usually takes', usual ? `about ${span(usual, true)}` : 'New for this profile'],
+        ['Platform', form.platform === 'android' ? 'Android' : target().simulator ? 'iOS Simulator' : 'iOS'], ['Profile', profile ? esc(profile.name) : '—'],
+        ['Builds', form.platform === 'android' ? target().artifact.toUpperCase() : target().simulator ? 'Simulator app' : 'IPA'],
+        ['Then', form.submit ? `Upload to ${storeName(form.platform)}` : skip() ? 'Reuse if unchanged' : 'Keep the build here'], ['Usually takes', usual ? `about ${span(usual, true)}` : 'New for this profile'],
       ], 'list-kv')}
       <div class="card-body" style="border-top:1px solid var(--line)"><button class="btn primary lg block" id="go">${icon('layers')}Start build</button><p class="hint bad" id="error"></p></div>`;
   };
@@ -785,26 +887,31 @@ async function newBuildPage({ name, branch }) {
   app.onclick = async (event) => {
     const source = event.target.closest('[data-source]');
     if (source) { form.source = source.dataset.source; form.commit = ''; loadCommits(); return; }
+    const platform = event.target.closest('[data-platform]');
+    if (platform) { form.platform = platform.dataset.platform; form.skip = null; drawProfiles(); drawSummary(); return; }
     if (event.target.closest('#go')) {
       const go = $('#go'); go.disabled = true;
       const ref = form.source === 'branch' ? form.commit || form.branch : null;
-      const created = await post('/api/builds', { project: name, profile: form.profile, ref, label: form.source === 'branch' ? form.branch : undefined, submit: form.submit });
+      const created = await post('/api/builds', { project: name, profile: form.profile, platform: form.platform, ref, label: form.source === 'branch' ? form.branch : undefined, submit: form.submit, skipUnchanged: skip() });
       if (created.id) location.hash = `#/build/${created.id}`;
       else { $('#error').textContent = created.error ?? 'Could not start the build'; go.disabled = false; }
     }
   };
   app.onchange = async (event) => {
-    const { target } = event;
-    if (target.id === 'branch') { form.branch = target.value; form.commit = ''; loadCommits(); }
-    if (target.id === 'commit') { form.commit = target.value; drawSummary(); }
-    if (target.name === 'profile') { form.profile = target.value; drawSummary(); }
-    if (target.id === 'submit') { form.submit = target.checked; drawSummary(); }
-    if (target.id === 'auto') {
-      await post('/api/triggers', { project: name, branch: form.branch, profile: form.profile, submit: form.submit, enabled: target.checked });
+    const { target: input } = event;
+    if (input.id === 'branch') { form.branch = input.value; form.commit = ''; loadCommits(); }
+    if (input.id === 'commit') { form.commit = input.value; drawSummary(); }
+    if (input.name === 'profile') { form.profile = input.value; form.skip = null; drawSummary(); }
+    if (input.id === 'submit') { form.submit = input.checked; drawSummary(); }
+    if (input.id === 'skip') { form.skip = input.checked; drawSummary(); }
+    if (input.id === 'auto') {
+      const result = await post('/api/triggers', { project: name, on: 'push', branch: form.branch, profile: form.profile, platform: form.platform, submit: form.submit, skipUnchanged: skip(), enabled: input.checked });
+      if (result.error) $('#error').textContent = result.error;
       data.triggers = (await get(`/api/projects/${encodeURIComponent(name)}`)).triggers;
       drawSummary();
     }
   };
+  drawProfiles();
   await loadCommits();
 }
 
@@ -842,8 +949,18 @@ async function insightsPage() {
     const mine = builds.filter((build) => build.project === name);
     const done = mine.filter((build) => ['success', 'failed'].includes(build.status));
     const ok = mine.filter((build) => build.status === 'success' && build.startedAt && build.finishedAt);
-    return { name, week: mine.filter((build) => now - build.createdAt < 7 * DAY).length, rate: done.length ? Math.round((done.filter((build) => build.status === 'success').length / done.length) * 100) : null, typical: ok.length ? median(ok.map((build) => build.finishedAt - build.startedAt)) : null, last: mine[0] };
+    const sized = mine.find((build) => build.status === 'success' && build.ipaBytes && !build.simulator);
+    return { name, week: mine.filter((build) => now - build.createdAt < 7 * DAY).length, rate: done.length ? Math.round((done.filter((build) => build.status === 'success').length / done.length) * 100) : null, typical: ok.length ? median(ok.map((build) => build.finishedAt - build.startedAt)) : null, last: mine[0], size: sized?.ipaBytes };
   });
+  // App size over time for one project: builds of the platform and profile of its latest build, so like is compared with like.
+  const sized = picked.filter((build) => build.status === 'success' && build.ipaBytes && !build.simulator);
+  const sizeSeries = prefs.scope === 'all' || !sized.length ? [] : sized.filter((build) => (build.platform ?? 'ios') === (sized[0].platform ?? 'ios') && build.profile === sized[0].profile).slice(0, 20).reverse();
+  const sizes = sizeSeries.map((build, index) => {
+    const before = sizeSeries[index - 1]?.ipaBytes;
+    const change = before ? build.ipaBytes - before : 0;
+    return { label: `${short(build)} · ${day(build.createdAt)}${Math.abs(change) >= 52429 ? ` · ${change > 0 ? '+' : '−'}${mb(Math.abs(change))}` : ''}`, tick: day(build.createdAt), tip: mb(build.ipaBytes), parts: [{ value: build.ipaBytes / 1048576 }] };
+  });
+  const sizeTitle = sizeSeries.length ? `${sizeSeries[0].platform === 'android' ? 'Android' : 'iOS'} · ${sizeSeries[0].profile}` : '';
   const kpi = (ic, label, value, note) => `<div class="card kpi"><div class="k">${icon(ic)}${label}</div><div class="v">${value}</div><div class="n">${note}</div></div>`;
   app.innerHTML = `${mobileTop()}${header('Insights', `How builds have gone on ${esc(machineName())}.`)}
     <div class="toolbar"><div class="seg" role="group" aria-label="Projects">${['all', ...names].map((name) => `<button data-scope="${esc(name)}" class="${prefs.scope === name ? 'on' : ''}">${name === 'all' ? 'All projects' : esc(name)}</button>`).join('')}</div></div>
@@ -859,12 +976,16 @@ async function insightsPage() {
     </div>
     <div class="cols two section">
       ${card('Where the time goes', 'clock', phases.length ? `<div class="card-body hbars">${phases.map((item) => `<div class="hbar"><span>${esc(phaseName(item.key))}</span><div class="track"><i style="width:${((item.ms / longest) * 100).toFixed(1)}%"></i></div><em>${span(item.ms)}</em></div>`).join('')}</div><div class="card-foot">Median time in each phase of a successful build.</div>` : empty('clock', 'No phase timings yet'))}
-      ${card('By project', 'apps', `<div class="table-wrap"><table class="table"><thead><tr><th>Project</th><th class="r">This week</th><th class="r">Passed</th><th class="r">Typical</th><th class="r">Last build</th></tr></thead><tbody>${byProject.map((row) => `<tr><td><a class="who" href="#/p/${esc(row.name)}">${avatar(row.name, 'sm')}${esc(row.name)}</a></td><td class="r">${row.week}</td><td class="r">${row.rate === null ? '—' : `${row.rate}%`}</td><td class="r">${row.typical ? span(row.typical) : '—'}</td><td class="r">${row.last ? `<span class="last">${statusIcon(row.last.status)}${ago(row.last.createdAt)}</span>` : '—'}</td></tr>`).join('')}</tbody></table></div>`)}
+      ${card('App size', 'download', sizes.length > 1 ? '<div class="card-body chart" data-chart="2"></div>' : `<div class="card-body muted">${prefs.scope === 'all' ? 'Pick a project above to see how its app size changes from build to build.' : 'Two finished builds of the same profile are needed to compare sizes.'}</div>`, sizeTitle ? `<span class="faint">${esc(sizeTitle)}</span>` : '')}
+    </div>
+    <div class="section">
+      ${card('By project', 'apps', `<div class="table-wrap"><table class="table"><thead><tr><th>Project</th><th class="r">This week</th><th class="r">Passed</th><th class="r">Typical</th><th class="r">App size</th><th class="r">Last build</th></tr></thead><tbody>${byProject.map((row) => `<tr><td><a class="who" href="#/p/${esc(row.name)}">${avatar(row.name, 'sm')}${esc(row.name)}</a></td><td class="r">${row.week}</td><td class="r">${row.rate === null ? '—' : `${row.rate}%`}</td><td class="r">${row.typical ? span(row.typical) : '—'}</td><td class="r">${row.size ? mb(row.size) : '—'}</td><td class="r">${row.last ? `<span class="last">${statusIcon(row.last.status)}${ago(row.last.createdAt)}</span>` : '—'}</td></tr>`).join('')}</tbody></table></div>`)}
     </div>`;
   // Drawn once the cards exist, at their real width, so the axis text stays at its intended size.
   const charts = [
     [perDay, { format: (value, axis) => (axis ? String(Math.round(value)) : plural(value, 'build')), axis: stepFor }],
     [durations, { format: minutes, axis: stepFor, median: times.length ? median(times) / 60000 : null }],
+    [sizes, { format: (value, axis) => (axis ? `${Math.round(value)} MB` : `${value.toFixed(1)} MB`), axis: stepFor }],
   ];
   document.querySelectorAll('[data-chart]').forEach((box) => {
     const [items, options] = charts[box.dataset.chart];
@@ -880,32 +1001,75 @@ async function settingsPage() {
   const data = await get('/api/system');
   const canPush = 'PushManager' in window && 'serviceWorker' in navigator;
   const enabled = canPush ? Boolean(await Promise.race([pushState(), new Promise((resolve) => { setTimeout(() => resolve(null), 800); })])) : false;
-  const { machine = {} } = data;
+  const { machine = {}, settings = {}, tools = {} } = data;
   const used = data.diskTotal ? 1 - data.diskFree / data.diskTotal : 0;
   const load = Math.min(1, data.load / Math.max(1, data.cores));
   const hours = Math.floor(data.uptime / 3600);
   const meter = (label, value, fraction, low = false) => `<div><div class="meter-label"><span>${label}</span><span>${value}</span></div><div class="bar ${low ? 'low' : ''}"><i style="width:${(fraction * 100).toFixed(1)}%"></i></div></div>`;
-  app.innerHTML = `${mobileTop()}${header('Settings', 'This Mac, notifications and automatic builds.')}
+  app.innerHTML = `${mobileTop()}${header('Settings', 'This Mac, notifications, integrations and automatic builds.')}
     <div class="settings"><div class="stack">
       <section class="card"><div class="hero-mac"><span class="mac">${icon('mac')}</span><div><b>${esc(machine.name || 'This Mac')}</b><small>${esc([machine.chip, machine.memory && `${Math.round(machine.memory / 1073741824)} GB`, machine.macos && `macOS ${machine.macos}`].filter(Boolean).join(' · '))}</small></div>
         <span class="pill" style="margin-left:auto">${data.current ? '<span class="led busy"></span>Building' : '<span class="led idle"></span>Idle'}</span></div>
         <div class="meters">${meter('Disk', `${gb(data.diskFree)} free of ${gb(data.diskTotal)}`, used, used > 0.9)}${meter('Load', `${data.load.toFixed(1)} on ${data.cores} cores`, load)}${data.battery ? meter('Battery', `${data.battery.percent}% · ${esc(data.battery.state)}`, data.battery.percent / 100, data.battery.percent < 20) : ''}</div>
         ${kv([['Up for', hours > 47 ? `${Math.floor(hours / 24)} days` : plural(hours, 'hour')], ['Queue', data.current ? `Building, ${data.queued} waiting` : `${data.queued} waiting`]], 'list-kv')}</section>
+      ${card('Disk cleanup', 'broom', `<div id="disk">${skeleton(5)}</div>`, '<button class="btn sm ghost" id="disk-again">Measure again</button>')}
       ${card('Notifications', 'bell', `<label class="toggle"><span><b>When a build finishes</b><small id="push-note">${canPush ? (enabled ? 'On for this device.' : 'A notification on this device when each build finishes or fails.') : 'Add macbuild to your Home Screen, then open it from there to turn this on.'}</small></span><input class="switch" type="checkbox" id="push" ${enabled ? 'checked' : ''} ${canPush ? '' : 'disabled'}></label>
         ${enabled ? '<div class="card-foot"><button class="btn sm" id="push-test">Send a test</button></div>' : ''}`)}
-      ${card('Storage', 'disk', kv([['Builds kept', `${data.kept?.builds ?? '—'} <span class="faint">of ${data.kept?.maxBuilds ?? 200}</span>`], ['IPAs kept', `${data.kept?.ipas ?? '—'} <span class="faint">of ${data.kept?.maxIpas ?? 10}</span>`], ['Space used by IPAs', mb(data.ipaBytes)]], 'list-kv'), '<span class="faint">Oldest go first</span>')}
     </div><div class="stack">
-      ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<div class="row">${avatar(rule.project, 'sm')}<span class="main"><span class="title">${esc(rule.project)} <span class="faint">/</span> ${esc(rule.branch)}</span><span class="meta">${esc(rule.profile)}${rule.submit ? ' · then TestFlight' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ''}</span></span>
-          ${rule.missing ? `<button class="btn sm remove-rule" data-project="${esc(rule.project)}" data-branch="${esc(rule.branch)}">Remove</button>` : `<a class="btn sm ghost" href="#/p/${esc(rule.project)}/automation">Manage</a>`}</div>`).join('')}</div>`
-        : empty('bolt', 'None yet', 'Turn on build-on-push from a project’s Build automation page.'))}
-      ${card('Tools', 'gear', kv([['Xcode', esc(data.tools.xcode || '—')], ['EAS CLI', esc(data.tools.eas || '—')], ['Node.js', esc(data.tools.node)]], 'list-kv'))}
+      ${card('Integrations', 'link', `<div class="rows">
+        <label class="toggle"><span><b>Build status on GitHub</b><small>${tools.gh ? 'Each build of a pushed commit shows up as a check on its commit and pull request, linked to its page here.' : 'Needs the GitHub CLI signed in on this Mac: run <span class="code">gh auth login</span>.'}</small></span><input class="switch" type="checkbox" id="gh-status" ${settings.githubStatus ? 'checked' : ''} ${tools.gh || settings.githubStatus ? '' : 'disabled'}></label>
+        <form class="setting" id="hook-form"><div><b>Slack or Discord</b><small>${settings.webhook ? `A message goes to ${esc(settings.webhook)} when each build ends.` : 'Paste an incoming webhook URL to get a message when each build ends.'}</small></div>
+          <div class="inline"><input class="input" id="hook" type="url" placeholder="${settings.webhook ? 'Paste a new URL to replace it' : 'https://hooks.slack.com/services/…'}" autocomplete="off" aria-label="Webhook URL"><button class="btn sm">Save</button>${settings.webhook ? '<button type="button" class="btn sm" id="hook-test">Send a test</button><button type="button" class="btn sm ghost" id="hook-remove">Remove</button>' : ''}</div>
+          <p class="hint" id="hook-note"></p></form>
+        <form class="setting" id="team-form"><div><b>Apple Team ID</b><small>Lists your team’s registered devices on each project’s Signing page. It’s on developer.apple.com under Membership.</small></div>
+          <div class="inline"><input class="input mono" id="team" placeholder="ABCDE12345" value="${esc(settings.appleTeam ?? '')}" maxlength="10" autocomplete="off" aria-label="Apple Team ID"><button class="btn sm">Save</button></div><p class="hint" id="team-note"></p></form>
+      </div>`)}
+      ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<div class="row">${avatar(rule.project, 'sm')}<span class="main"><span class="title">${esc(rule.project)} <span class="faint">/</span> ${ruleTitle(rule)}</span><span class="meta">${ruleDetail(rule)}</span></span>
+          ${rule.missing ? `<button class="btn sm remove-rule" data-project="${esc(rule.project)}" data-on="${esc(rule.on ?? 'push')}" data-branch="${esc(rule.branch ?? '')}">Remove</button>` : `<a class="btn sm ghost" href="#/p/${esc(rule.project)}/automation">Manage</a>`}</div>`).join('')}</div>`
+        : empty('bolt', 'None yet', 'Add rules from a project’s Build automation page.'))}
+      ${card('Storage', 'disk', kv([['Builds kept', `${data.kept?.builds ?? '—'} <span class="faint">of ${data.kept?.maxBuilds ?? 200}</span>`], ['Build files kept', `${data.kept?.ipas ?? '—'} <span class="faint">of ${data.kept?.maxIpas ?? 10}</span>`], ['Space used by build files', mb(data.ipaBytes)]], 'list-kv'), '<span class="faint">Oldest go first</span>')}
+      ${card('Tools', 'gear', kv([['Xcode', esc(tools.xcode || '—')], ['EAS CLI', esc(tools.eas || '—')], ['Node.js', esc(tools.node)], ['GitHub CLI', tools.gh ? 'Signed in' : '<span class="faint">Not signed in</span>'], ['Android SDK', tools.android ? 'Found' : '<span class="faint">Not installed</span>']], 'list-kv'))}
       ${card('About', 'cube', `<div class="card-body muted">macbuild runs <span class="mono">eas build --local</span> on this Mac, so builds cost nothing and never wait in someone else’s queue. Expo still holds your credentials and project settings. <a class="link" href="https://github.com/fav-devs/macbuild">github.com/fav-devs/macbuild</a></div>`)}
     </div></div>`;
+  const drawDisk = (disk) => {
+    const clearable = disk.items.filter((item) => item.cleanable && item.bytes).reduce((sum, item) => sum + item.bytes, 0);
+    $('#disk').innerHTML = `<div class="rows">${disk.items.map((item) => `<div class="row"><span class="main"><span class="title">${esc(item.label)}</span><span class="meta wrap">${esc(item.note)}</span></span>
+      <span class="end"><span class="num">${item.bytes === null ? '—' : item.bytes ? (item.bytes >= 1e9 ? gb(item.bytes) : mb(item.bytes)) : 'Empty'}</span>${item.cleanable ? `<button class="btn sm" data-clean="${esc(item.key)}" data-label="${esc(item.label)}" ${item.bytes || item.key === 'simulators' ? '' : 'disabled'}>Clear</button>` : '<span class="btn sm ghost" style="visibility:hidden">Clear</span>'}</span></div>`).join('')}</div>
+      <div class="card-foot">${clearable ? `About ${clearable >= 1e9 ? gb(clearable) : mb(clearable)} can be cleared. ` : ''}Clearing is refused while a build runs.</div>`;
+  };
+  const loadDisk = async (fresh) => { $('#disk').innerHTML = skeleton(5); drawDisk(await get(`/api/disk${fresh ? '?fresh' : ''}`)); };
+  loadDisk(false).catch(() => { $('#disk').innerHTML = empty('disk', 'Couldn’t measure the disk'); });
   const toggle = $('#push');
   if (toggle) toggle.onchange = () => togglePush(toggle.checked, $('#push-note'));
+  const saveSetting = async (changes, note) => {
+    const response = await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify(changes) });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) { note.className = 'hint bad'; note.textContent = result.error ?? 'Couldn’t save that.'; return false; }
+    return true;
+  };
+  $('#gh-status').onchange = async (event) => { await saveSetting({ githubStatus: event.target.checked }, $('#hook-note')); };
+  $('#hook-form').onsubmit = async (event) => { event.preventDefault(); if ($('#hook').value && await saveSetting({ webhook: $('#hook').value.trim() }, $('#hook-note'))) route(); };
+  $('#team-form').onsubmit = async (event) => {
+    event.preventDefault();
+    if (await saveSetting({ appleTeam: $('#team').value.trim().toUpperCase() }, $('#team-note'))) { expoCache.clear(); $('#team-note').className = 'hint ok'; $('#team-note').textContent = 'Saved.'; }
+  };
   app.onclick = async (event) => {
     const test = event.target.closest('#push-test');
     if (test) { test.textContent = 'Sent'; await post('/api/push', { test: true }); }
+    if (event.target.closest('#hook-test')) {
+      const result = await post('/api/settings/webhook-test');
+      $('#hook-note').className = `hint ${result.error ? 'bad' : 'ok'}`;
+      $('#hook-note').textContent = result.error ?? 'Sent. Check the channel.';
+    }
+    if (event.target.closest('#hook-remove') && confirm('Stop sending build messages to this webhook?')) { if (await saveSetting({ webhook: '' }, $('#hook-note'))) route(); }
+    if (event.target.closest('#disk-again')) loadDisk(true);
+    const clean = event.target.closest('[data-clean]');
+    if (clean && confirm(`Clear ${clean.dataset.label}?`)) {
+      clean.disabled = true; clean.textContent = 'Clearing…';
+      const response = await fetch('/api/disk/clean', { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify({ key: clean.dataset.clean }) });
+      const result = await response.json().catch(() => ({}));
+      if (response.ok) drawDisk(result); else { flash(result.error ?? 'Couldn’t clear that.', true); clean.disabled = false; clean.textContent = 'Clear'; }
+    }
   };
 }
 
@@ -989,12 +1153,19 @@ document.addEventListener('click', async (event) => {
   const cancel = event.target.closest('[data-cancel]');
   const rebuild = event.target.closest('[data-rebuild]');
   const remove = event.target.closest('.remove-rule');
+  const simulator = event.target.closest('[data-simulator]');
+  if (simulator) {
+    simulator.disabled = true;
+    const result = await post(`/api/builds/${simulator.dataset.simulator}/simulator`);
+    simulator.disabled = false;
+    flash(result.error ?? `Opened ${result.bundle} in the Simulator on ${machineName()}.`, Boolean(result.error));
+  }
   if (cancel && confirm('Cancel this build?')) { await post(`/api/builds/${cancel.dataset.cancel}/cancel`); route(); }
   if (rebuild && confirm('Build this again?')) {
     const created = await post(`/api/builds/${rebuild.dataset.rebuild}/rebuild`);
     if (created.id) location.hash = `#/build/${created.id}`;
   }
-  if (remove) { await post('/api/triggers', { project: remove.dataset.project, branch: remove.dataset.branch, enabled: false }); route(); }
+  if (remove) { await post('/api/triggers', { project: remove.dataset.project, on: remove.dataset.on, branch: remove.dataset.branch, enabled: false }); route(); }
 });
 addEventListener('hashchange', () => { scrollTo(0, 0); route(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !['new', 'settings'].includes(parseRoute().page)) { loadShell(); route(); } });

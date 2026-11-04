@@ -4,10 +4,12 @@
 //   node ui/demo/demo.mjs [--port 4181]     then open http://localhost:4181
 // One build is running when the demo starts and another is queued behind it.
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { diagnose } from '../../lib/diagnose.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 0) || 4181;
@@ -94,8 +96,8 @@ for (const [index, project] of PROJECTS.entries()) {
 }
 writeFileSync(join(DIR, 'projects.conf'), PROJECTS.map((project) => `${project.name}|${project.dir}`).join('\n') + '\n');
 
-// Build history: three weeks of builds across the projects, with logs grouped into EAS's phases.
-const PHASES = [
+// Build history: two weeks of builds across the projects and both platforms, with logs grouped into EAS's phases.
+const IOS_PHASES = [
   ['SETUP_WORKINGDIR', 2, ['Preparing workingdir']], ['START_BUILD', 1, ['Starting build', 'Platform: ios']],
   ['READ_EAS_JSON', 1, ['Using eas.json']], ['READ_PACKAGE_JSON', 1, ['Using package.json']],
   ['INSTALL_DEPENDENCIES', 52, ['Running "npm ci --include=dev"', 'added 1284 packages, and audited 1285 packages in 49s', '231 packages are looking for funding']],
@@ -107,81 +109,134 @@ const PHASES = [
   ['RUN_FASTLANE', 420, ['Running "fastlane ios build"', '▸ Compiling ExpoModulesCore', '▸ Compiling React-Core', '▸ Compiling hermes-engine', '▸ Compiling AppDelegate.swift', '▸ Linking', '▸ Signing', '▸ Archive Succeeded', '** ARCHIVE SUCCEEDED **']],
   ['PREPARE_ARTIFACTS', 6, ['Preparing artifacts']], ['UPLOAD_APPLICATION_ARCHIVE', 3, ['Application archive saved']],
 ];
-const FAILURES = [
-  ['RUN_FASTLANE', '❌ error: Provisioning profile "*[expo] com.acme.pulse AdHoc" doesn\'t include the currently selected device "Priya’s iPhone".'],
-  ['INSTALL_PODS', 'Error: [!] CocoaPods could not find compatible versions for pod "ExpoModulesCore"'],
-  ['RUN_FASTLANE', '❌ error: Value of type \'NotesStore\' has no member \'syncNow\''],
+const ANDROID_PHASES = [
+  ['SETUP_WORKINGDIR', 2, ['Preparing workingdir']], ['START_BUILD', 1, ['Starting build', 'Platform: android']],
+  ['READ_EAS_JSON', 1, ['Using eas.json']], ['READ_PACKAGE_JSON', 1, ['Using package.json']],
+  ['INSTALL_DEPENDENCIES', 50, ['Running "npm ci --include=dev"', 'added 1284 packages in 47s']],
+  ['READ_APP_CONFIG', 3, ['Using app configuration']], ['RUN_EXPO_DOCTOR', 9, ['17/17 checks passed. No issues detected!']],
+  ['PREPARE_CREDENTIALS', 3, ['Using keystore from EAS']], ['PREBUILD', 16, ['- Creating native directory (./android)', '✔ Finished prebuild']],
+  ['CONFIGURE_EXPO_UPDATES', 2, ['Setting the update channel']],
+  ['RUN_GRADLEW', 380, ['Running "./gradlew :app:assembleRelease"', '> Task :expo-modules-core:compileReleaseKotlin', '> Task :app:createBundleReleaseJsAndAssets', '> Task :app:packageRelease', 'BUILD SUCCESSFUL in 6m 12s']],
+  ['PREPARE_ARTIFACTS', 5, ['Preparing artifacts']], ['UPLOAD_APPLICATION_ARCHIVE', 3, ['Application archive saved']],
 ];
+const FAILURES = {
+  device: ['RUN_FASTLANE', '❌ error: Provisioning profile "*[expo] com.acme.pulse AdHoc" doesn\'t include the currently selected device "Priya’s iPhone".'],
+  pods: ['INSTALL_PODS', 'Error: [!] CocoaPods could not find compatible versions for pod "ExpoModulesCore"'],
+  swift: ['RUN_FASTLANE', '❌ /ios/notes/NotesStore.swift:48:12: error: Value of type \'NotesStore\' has no member \'syncNow\''],
+  java: ['RUN_GRADLEW', 'FAILURE: Build failed with an exception. Unsupported class file major version 65'],
+};
+const BASE_SIZE = { notes: 39.2, recipes: 44.1, pulse: 31.4 };
+const fingerprintOf = (...parts) => createHash('sha1').update(parts.join('/')).digest('hex');
+const seeded = [];
 let serial = 0;
-function seedBuild(project, { ago, branch = 'main', step = 0, profile = 'development', status = 'success', testflight = false, trigger = 'manual', source = 'github', ipa = false, minutes = 9 }) {
+function seedBuild(project, { ago, branch = 'main', step = 0, profile = 'development', platform = 'ios', status = 'success', submit = false, trigger = 'manual', by, source = 'github', file = false, minutes = 9, failure, grow = 0 }) {
   serial += 1;
   const commits = project.commits[branch];
   const commit = commits[Math.max(0, commits.length - 1 - step)];
   const createdAt = NOW - ago;
   const startedAt = createdAt + 2000 + (serial % 5) * 1000;
-  const failure = status === 'failed' ? FAILURES[serial % FAILURES.length] : null;
-  const scale = (minutes * MINUTE + ((serial * 7919) % 50) * 1000) / PHASES.reduce((sum, [, seconds]) => sum + seconds * 1000, 0);
-  let at = startedAt;
-  const phases = [];
-  let log = '';
-  for (const [name, seconds, lines] of PHASES) {
-    phases.push({ name, at });
-    const stops = failure?.[0] === name || (status === 'cancelled' && name === 'INSTALL_PODS');
-    log += (stops ? lines.slice(0, Math.ceil(lines.length / 2)) : lines).map((line) => `[${name}] ${line}\n`).join('');
-    at += seconds * 1000 * scale * (stops ? 0.6 : 1);
-    if (failure?.[0] === name) { log += `[${name}] ${failure[1]}\n`; break; }
-    if (stops) break;
-  }
-  if (testflight && status === 'success') {
-    phases.push({ name: 'SUBMIT', at });
-    log += 'Scheduling iOS submission\nSubmitted your app to Apple App Store Connect!\n';
-    at += 3 * MINUTE;
-  }
-  if (status === 'success') log += 'Build successful\n';
-  const store = profile === 'production';
+  const android = platform === 'android'; const simulator = profile === 'simulator'; const store = profile === 'production';
+  const artifact = android ? (store ? 'app.aab' : 'app.apk') : simulator ? 'app.tar.gz' : 'app.ipa';
+  const fingerprint = fingerprintOf(project.name, platform, Math.floor((commits.length - step) / 3), branch === 'main' ? '' : branch);
   const id = `${new Date(createdAt).toISOString().replace(/\D/g, '').slice(0, 14)}-${project.name}`;
   const build = {
-    id, project: project.name, action: testflight ? 'testflight' : 'build', profile, distribution: store ? 'store' : 'internal', channel: profile,
-    source, ref: branch, trigger, status, createdAt, startedAt, finishedAt: at + 2000, phases,
+    id, project: project.name, platform, action: submit ? 'submit' : 'build', profile, distribution: store ? 'store' : 'internal', channel: profile === 'simulator' ? 'development' : profile,
+    artifact, simulator, devClient: profile === 'development' || simulator, source, ref: branch, trigger, by: by ? { name: by, login: `${by.split(' ')[0].toLowerCase()}@acme.dev` } : null,
+    status, createdAt, startedAt, fingerprint,
     commit: { hash: commit.hash, short: commit.hash.slice(0, 7), subject: commit.subject, author: commit.author, date: commit.when, url: `https://github.com/${project.repo}/commit/${commit.hash}` },
     pr: branch !== 'main' ? { number: 40 + (serial % 30), title: commit.subject, url: `https://github.com/${project.repo}/pull/${40 + (serial % 30)}` } : null,
     repo: project.repo, dirty: source === 'working' ? 3 : 0,
   };
-  if (status === 'failed') build.reason = failure[1];
-  if (status === 'success') {
-    build.app = { id: project.bundle, name: project.title, version: project.version, number: String(40 + serial) };
-    build.signing = store
-      ? { profile: `*[expo] ${project.bundle} AppStore`, team: 'Acme Labs (T3AM1D2345)', expires: new Date(NOW + 290 * DAY).toISOString(), devices: 0 }
-      : { profile: `*[expo] ${project.bundle} AdHoc`, team: 'Acme Labs (T3AM1D2345)', expires: new Date(NOW + 22 * DAY).toISOString(), devices: 4 };
-    build.installable = !store; build.ipaBytes = (38 + (serial % 9)) * 1048576; build.runtime = project.version;
-    build.expired = !ipa;
-    if (testflight) build.submission = `https://expo.dev/accounts/acme/projects/${project.name}/submissions/6f1c2a0e-${String(serial).padStart(4, '0')}-4d3b-9a51-2c7e8b1d0f42`;
+  let log = `macbuild: fingerprint ${fingerprint}\n`;
+  if (status === 'skipped') {
+    // Reuses the newest earlier build of the same kind, which is what --skip-unchanged finds by fingerprint.
+    const earlier = seeded.filter((item) => item.status === 'success' && item.project === project.name && item.profile === profile && item.platform === platform).at(-1);
+    Object.assign(build, { reusedFrom: earlier.id, app: earlier.app, ipaBytes: earlier.ipaBytes, installable: false, phases: [], finishedAt: startedAt + 9000, fingerprint: earlier.fingerprint });
+    log += `macbuild: unchanged since ${join(DATA, earlier.id, earlier.artifact)}\n`;
+    seeded.push(build);
+    return writeBuild(build, log);
   }
-  mkdirSync(join(DATA, id));
-  writeFileSync(join(DATA, id, 'meta.json'), JSON.stringify(build));
-  writeFileSync(join(DATA, id, 'build.log'), log);
-  if (status === 'success' && ipa) writeFileSync(join(DATA, id, 'app.ipa'), 'demo');
+  const PHASES = android ? ANDROID_PHASES : IOS_PHASES;
+  const failing = failure ? FAILURES[failure] : null;
+  const scale = (minutes * MINUTE + ((serial * 7919) % 50) * 1000) / PHASES.reduce((sum, [, seconds]) => sum + seconds * 1000, 0);
+  let at = startedAt;
+  const phases = [];
+  for (const [name, seconds, lines] of PHASES) {
+    phases.push({ name, at });
+    const stops = failing?.[0] === name || (status === 'cancelled' && ['INSTALL_PODS', 'RUN_GRADLEW'].includes(name));
+    log += (stops ? lines.slice(0, Math.ceil(lines.length / 2)) : lines).map((line) => `[${name}] ${line}\n`).join('');
+    at += seconds * 1000 * scale * (stops ? 0.6 : 1);
+    if (failing?.[0] === name) { log += `[${name}] ${failing[1]}\n`; break; }
+    if (stops) break;
+  }
+  if (submit && status === 'success') {
+    phases.push({ name: 'SUBMIT', at });
+    log += `Scheduling ${android ? 'Android' : 'iOS'} submission\nSubmitted your app to ${android ? 'Google Play' : 'Apple App Store Connect'}!\n`;
+    at += 3 * MINUTE;
+  }
+  if (status === 'success') log += 'Build successful\n';
+  Object.assign(build, { phases, finishedAt: at + 2000 });
+  if (status === 'failed') { build.reason = failing[1]; build.hint = diagnose(log); }
+  if (status === 'success') {
+    const before = seeded.filter((item) => item.status === 'success' && item.project === project.name && item.profile === profile && item.platform === platform).at(-1);
+    const size = (BASE_SIZE[project.name] - (android ? 9 : 0) - (store && android ? 6 : 0) + (seeded.length * 0.06) + grow) * 1048576;
+    build.app = { id: project.bundle, name: project.title, version: project.version, number: String(40 + serial) };
+    if (!android && !simulator) {
+      build.signing = store
+        ? { profile: `*[expo] ${project.bundle} AppStore`, team: 'Acme Labs (T3AM1D2345)', expires: new Date(NOW + 290 * DAY).toISOString(), devices: 0 }
+        : { profile: `*[expo] ${project.bundle} AdHoc`, team: 'Acme Labs (T3AM1D2345)', expires: new Date(NOW + 22 * DAY).toISOString(), devices: 4 };
+      build.runtime = project.version;
+    }
+    Object.assign(build, { installable: !store && !simulator, ipaBytes: Math.round(size), sizeBefore: before?.ipaBytes, expired: !file });
+    if (submit) build.submission = `https://expo.dev/accounts/acme/projects/${project.name}/submissions/6f1c2a0e-${String(serial).padStart(4, '0')}-4d3b-9a51-2c7e8b1d0f42`;
+  }
+  seeded.push(build);
+  return writeBuild(build, log, status === 'success' && file);
+}
+function writeBuild(build, log, file = false) {
+  mkdirSync(join(DATA, build.id));
+  writeFileSync(join(DATA, build.id, 'meta.json'), JSON.stringify(build));
+  writeFileSync(join(DATA, build.id, 'build.log'), log);
+  if (file) writeFileSync(join(DATA, build.id, build.artifact), 'demo');
 }
 const [notes, recipes, pulse] = PROJECTS;
 const history = [
-  [notes, { ago: 2 * HOUR, ipa: true, minutes: 8 }], [pulse, { ago: 5 * HOUR, branch: 'feature/onboarding', status: 'failed', minutes: 7 }],
-  [recipes, { ago: 7 * HOUR, profile: 'production', testflight: true, ipa: true, minutes: 14 }], [notes, { ago: 9 * HOUR, branch: 'feature/folders', ipa: true, trigger: 'push' }],
-  [pulse, { ago: 26 * HOUR, branch: 'fix/launch', ipa: true, minutes: 8 }], [notes, { ago: 28 * HOUR, source: 'working', ipa: true, minutes: 7 }],
-  [recipes, { ago: 30 * HOUR, branch: 'feature/meal-plan', status: 'cancelled' }], [notes, { ago: 2 * DAY, profile: 'production', testflight: true, ipa: true, minutes: 13 }],
-  [pulse, { ago: 2.2 * DAY, step: 1, ipa: true, minutes: 10 }], [recipes, { ago: 2.6 * DAY, step: 1, status: 'failed', minutes: 3 }],
-  [recipes, { ago: 2.8 * DAY, step: 1, minutes: 11 }], [notes, { ago: 3.1 * DAY, step: 1, trigger: 'push' }],
+  [notes, { ago: 2 * HOUR, file: true, minutes: 8, by: 'Priya Natarajan' }], [pulse, { ago: 5 * HOUR, branch: 'feature/onboarding', status: 'failed', failure: 'device', minutes: 7, trigger: 'pr' }],
+  [notes, { ago: 6 * HOUR, profile: 'simulator', file: true, minutes: 6, by: 'Alex Rivera' }],
+  [recipes, { ago: 7 * HOUR, profile: 'production', submit: true, file: true, minutes: 14, trigger: 'nightly', grow: 3.9 }], [notes, { ago: 9 * HOUR, branch: 'feature/folders', file: true, trigger: 'pr' }],
+  [notes, { ago: 11 * HOUR, branch: 'feature/folders', status: 'skipped', trigger: 'pr' }],
+  [pulse, { ago: 20 * HOUR, platform: 'android', file: true, minutes: 7, by: 'Sam Chen' }], [pulse, { ago: 26 * HOUR, branch: 'fix/launch', file: true, minutes: 8 }],
+  [notes, { ago: 28 * HOUR, source: 'working', file: true, minutes: 7 }], [recipes, { ago: 30 * HOUR, branch: 'feature/meal-plan', status: 'cancelled' }],
+  [pulse, { ago: 1.6 * DAY, platform: 'android', status: 'failed', failure: 'java', minutes: 4 }],
+  [notes, { ago: 2 * DAY, profile: 'production', submit: true, file: true, minutes: 13 }], [pulse, { ago: 2.2 * DAY, step: 1, file: true, minutes: 10 }],
+  [recipes, { ago: 2.6 * DAY, step: 1, status: 'failed', failure: 'pods', minutes: 3 }], [recipes, { ago: 2.8 * DAY, step: 1, minutes: 11 }],
+  [notes, { ago: 3.1 * DAY, step: 1, trigger: 'push' }], [notes, { ago: 3.3 * DAY, step: 1, status: 'skipped', trigger: 'push' }],
   [pulse, { ago: 3.5 * DAY, step: 2, profile: 'preview', minutes: 9 }], [notes, { ago: 4 * DAY, step: 2, profile: 'preview', minutes: 10 }],
-  [recipes, { ago: 4.4 * DAY, step: 2, profile: 'production', testflight: true, minutes: 15 }], [pulse, { ago: 5 * DAY, step: 2, status: 'failed', minutes: 6 }],
+  [recipes, { ago: 4.4 * DAY, step: 2, profile: 'production', submit: true, minutes: 15, trigger: 'nightly' }], [pulse, { ago: 4.7 * DAY, step: 2, platform: 'android', profile: 'production', submit: true, minutes: 11 }],
+  [pulse, { ago: 5 * DAY, step: 2, status: 'failed', failure: 'device', minutes: 6 }],
   [notes, { ago: 5.5 * DAY, step: 3, minutes: 11 }], [recipes, { ago: 6 * DAY, step: 3 }], [notes, { ago: 6.6 * DAY, step: 3, trigger: 'rebuild', minutes: 9 }],
-  [pulse, { ago: 7.2 * DAY, step: 3, minutes: 12 }], [notes, { ago: 8 * DAY, step: 4, profile: 'production', testflight: true, minutes: 16 }],
-  [recipes, { ago: 8.5 * DAY, step: 4, minutes: 10 }], [notes, { ago: 9.1 * DAY, step: 4, status: 'failed', minutes: 5 }],
+  [pulse, { ago: 7.2 * DAY, step: 3, minutes: 12 }], [notes, { ago: 8 * DAY, step: 4, profile: 'production', submit: true, minutes: 16 }],
+  [recipes, { ago: 8.5 * DAY, step: 4, minutes: 10 }], [notes, { ago: 9.1 * DAY, step: 4, status: 'failed', failure: 'swift', minutes: 5 }],
   [pulse, { ago: 9.6 * DAY, step: 4, minutes: 12 }], [notes, { ago: 10.3 * DAY, step: 5, minutes: 13 }], [recipes, { ago: 11 * DAY, step: 5, minutes: 12 }],
   [notes, { ago: 11.8 * DAY, step: 6, minutes: 14 }], [pulse, { ago: 12.4 * DAY, step: 5, minutes: 13 }], [notes, { ago: 13.2 * DAY, step: 7, minutes: 15 }],
 ];
-for (const [project, options] of history) seedBuild(project, options);
+// Oldest first, so a reused build and a size change can refer to the build before.
+for (const [project, options] of history.sort((a, b) => b[1].ago - a[1].ago)) seedBuild(project, options);
 
-// Build on push for notes' main branch, already up to date.
-writeFileSync(join(DIR, 'ui.json'), JSON.stringify({ triggers: [{ project: 'notes', branch: 'main', profile: 'development', submit: false, sha: notes.commits.main.at(-1).hash }] }, null, 2));
+// Automatic builds: every push to notes' main, its pull requests, and recipes to TestFlight every night. All up to date.
+const today = new Date(); const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+writeFileSync(join(DIR, 'ui.json'), JSON.stringify({
+  githubStatus: true,
+  triggers: [
+    { project: 'notes', on: 'push', branch: 'main', profile: 'development', platform: 'ios', submit: false, skipUnchanged: true, sha: notes.commits.main.at(-1).hash },
+    { project: 'notes', on: 'pr', profile: 'development', platform: 'ios', submit: false, skipUnchanged: true, prs: { 48: notes.commits['feature/folders'].at(-1).hash } },
+    { project: 'recipes', on: 'nightly', branch: 'main', at: '02:00', profile: 'production', platform: 'ios', submit: true, sha: recipes.commits.main.at(-1).hash, lastRun: todayKey },
+  ],
+}, null, 2));
+// A home folder for the server, with the folders Disk cleanup measures (their sizes come from the du stand-in).
+const HOME = join(DIR, 'home');
+for (const folder of ['Library/Developer/Xcode/DerivedData/CompilationCache.noindex', 'Library/Developer/Xcode/iOS DeviceSupport', 'Library/Caches/CocoaPods',
+  '.gradle/caches', '.cache/macbuild', 'Library/Developer/CoreSimulator/Devices', 'Library/Android/sdk']) mkdirSync(join(HOME, folder), { recursive: true });
 
 // Stand-ins on PATH. git only fakes the network; everything else is real git.
 const script = (name, body) => writeFileSync(join(BIN, name), `#!/bin/bash\n${body}`, { mode: 0o755 });
@@ -197,6 +252,13 @@ script('xcodebuild', 'echo "Xcode 26.1"; echo "Build version 17B55"\n');
 script('scutil', 'echo "Studio Mac"\n');
 script('sysctl', 'echo "Apple M3 Pro"\n');
 script('sw_vers', 'echo "26.1"\n');
+// Sizes for the folders Disk cleanup measures, in KB, as if the Mac had been building for a while.
+script('du', `case "$2" in
+  */CompilationCache.noindex) echo "6815744	$2";; */DerivedData) echo "25165824	$2";; *"iOS DeviceSupport") echo "15728640	$2";;
+  */CocoaPods) echo "2621440	$2";; */.gradle/caches) echo "4194304	$2";; */.cache/macbuild) echo "3145728	$2";; */CoreSimulator/Devices) echo "9437184	$2";;
+  *) exec "$(PATH=\${PATH#*:} command -v du)" "$@";;
+esac
+`);
 script('pmset', `echo "Now drawing from 'AC Power'"; echo " -InternalBattery-0 (id=4653155)	100%; charged; 0:00 remaining present: true"\n`);
 const expo = (project) => ({
   info: `fullName  @acme/${project.name}\nID        ${project.name}-4c1e-9a2b`,
@@ -236,6 +298,7 @@ esac
 `);
 script('gh', `# Pull requests and checks for the sample repositories.
 case "$1 $2" in
+  "auth status") echo "Logged in to github.com account acme" >&2;;
   "pr list") case " $* " in
     *" --head "*) echo '[{"number":48,"title":"Nested folders","url":"https://github.com/acme/notes/pull/48"}]';;
     *) echo '[{"number":48,"headRefName":"feature/folders","title":"Nested folders","url":"https://github.com/acme/notes/pull/48"},{"number":51,"headRefName":"feature/onboarding","title":"Onboarding carousel","url":"https://github.com/acme/pulse/pull/51"},{"number":44,"headRefName":"feature/meal-plan","title":"Weekly meal plan","url":"https://github.com/acme/kitchen/pull/44"}]';;
@@ -261,7 +324,7 @@ echo demo > "$out"
 const server = spawn(process.execPath, [join(HERE, '..', 'server.mjs')], {
   stdio: 'inherit',
   env: {
-    ...process.env, PATH: `${BIN}:${process.env.PATH}`, MACBUILD_UI_PORT: String(PORT), MACBUILD_BIN: join(BIN, 'macbuild'),
+    ...process.env, HOME, PATH: `${BIN}:${process.env.PATH}`, MACBUILD_UI_PORT: String(PORT), MACBUILD_BIN: join(BIN, 'macbuild'),
     MACBUILD_DATA: DATA, MACBUILD_PROJECTS: join(DIR, 'projects.conf'), MACBUILD_CONFIG: join(DIR, 'ui.json'), MACBUILD_APPLE_TEAM: 'T3AM1D2345',
     DEMO_BUILD_SECONDS: process.env.DEMO_BUILD_SECONDS ?? '600',
   },
@@ -273,7 +336,7 @@ for (let tries = 0; tries < 50; tries += 1) {
 }
 await post({ project: 'notes', profile: 'development', ref: 'feature/folders', label: 'feature/folders' });
 await new Promise((resolve) => { setTimeout(resolve, 1100); });
-await post({ project: 'pulse', profile: 'production', ref: 'main', label: 'main', submit: true });
+await post({ project: 'pulse', profile: 'production', platform: 'android', ref: 'main', label: 'main', submit: true });
 console.log(`macbuild demo: http://localhost:${PORT}  (data in ${DIR})`);
 const stop = () => { server.kill(); process.exit(0); };
 process.on('SIGINT', stop); process.on('SIGTERM', stop);

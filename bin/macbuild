@@ -1,12 +1,16 @@
 #!/bin/bash
-# Builds an iOS app on this Mac (eas build --local), answering the EAS prompts.
-#   macbuild <project> [--profile NAME] [--fast] [--install] [--send] [--testflight] [--output PATH]
-#   --profile     eas.json build profile (default development)
-#   --fast        fixed work directory + Xcode compilation caching, so later builds reuse compiled output
-#   --install     install on the paired iPhone with devicectl
-#   --send        Taildrop the IPA to the iPhone
-#   --testflight  production build, then upload to TestFlight (eas submit --path)
-#   --ref REF     build a pushed branch, tag or commit in a clean checkout (default: the working copy)
+# Builds an Expo app on this Mac (eas build --local), answering the EAS prompts.
+#   macbuild <project> [--platform ios|android] [--profile NAME] [--ref REF] [--install] [--submit] [--skip-unchanged]
+#   --platform ios|android  default ios; --android is short for --platform android
+#   --profile NAME     eas.json build profile (default development, or production with --submit)
+#   --ref REF          build a pushed branch, tag or commit in a clean checkout (default: the working copy)
+#   --install          install on the iPhone in MACBUILD_DEVICE, the simulator, or the Android device on adb
+#   --screenshot PATH  with --install on a simulator, save a screenshot of the app once it's open
+#   --submit           upload to TestFlight or Google Play afterwards (eas submit); --testflight works too
+#   --skip-unchanged   reuse the last build of this profile when the native code hasn't changed
+#   --fast             fixed work directory + Xcode compilation caching, so later builds reuse compiled output
+#   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
+#   --output PATH      where the build goes (default: your Desktop)
 # Other commands: macbuild list | add <name> <path> | scan | doctor
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 set -u
@@ -16,11 +20,23 @@ ROOT=$(cd "$HERE/.." && pwd)
 CONFIG="$HOME/.config/macbuild"; PROJECTS="${MACBUILD_PROJECTS:-$CONFIG/projects.conf}"
 [ -f "$CONFIG/env" ] && . "$CONFIG/env"
 export MACBUILD_APPLE_ID MACBUILD_APPLE_PASSWORD_FILE
+# Builds that ran, by native fingerprint: name|profile|platform|fingerprint|artifact|time. Read by --skip-unchanged.
+FINGERPRINTS="$HOME/.local/share/macbuild/fingerprints"
 # Project names end up in URLs, file names and build ids.
 valid_name() { case "$1" in ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1;; esac; }
 has_name() { N="$1" awk -F'|' '$1==ENVIRON["N"]{f=1} END{exit !f}' "$PROJECTS" 2>/dev/null; }
 has_dir() { D="$1" awk -F'|' '$2==ENVIRON["D"]{f=1} END{exit !f}' "$PROJECTS" 2>/dev/null; }
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//'; }
+android_env() {
+  # Android Studio's usual SDK and Java, unless the env file says otherwise. Exported, since eas and Gradle read them.
+  if [ -z "${ANDROID_HOME:-}" ] && [ -d "$HOME/Library/Android/sdk" ]; then ANDROID_HOME="$HOME/Library/Android/sdk"; fi
+  if [ -n "${ANDROID_HOME:-}" ]; then export ANDROID_HOME ANDROID_SDK_ROOT="$ANDROID_HOME"; PATH="$ANDROID_HOME/platform-tools:$PATH"; fi
+  if [ -z "${JAVA_HOME:-}" ]; then
+    JAVA_HOME=$(/usr/libexec/java_home -v 17 2>/dev/null) || JAVA_HOME=""
+    if [ -z "$JAVA_HOME" ] && [ -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home" ]; then JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"; fi
+  fi
+  if [ -n "${JAVA_HOME:-}" ]; then export JAVA_HOME; fi
+}
 add_project() {
   local name="$1" dir
   valid_name "$name" || { echo "bad name: $name (letters, digits, '.', '_' and '-', starting with a letter or digit)"; return 1; }
@@ -66,6 +82,9 @@ doctor() {
   else no eas-cli "npm install -g eas-cli"; fi
   command -v gh >/dev/null && gh auth status >/dev/null 2>&1 && ok "GitHub CLI" "signed in" || opt "GitHub CLI" "optional: PR and CI details in the web UI"
   [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ] || command -v tailscale >/dev/null && ok Tailscale "installed" || opt Tailscale "optional: needed to use the web UI from a phone"
+  android_env
+  [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ] && ok "Android SDK" "$ANDROID_HOME" || opt "Android SDK" "for Android builds: install Android Studio"
+  [ -n "${JAVA_HOME:-}" ] && ok "Java 17" "$JAVA_HOME" || opt "Java 17" "for Android builds: brew install --cask zulu@17"
   [ -s "$PROJECTS" ] && ok projects "$(grep -c '|' "$PROJECTS") listed" || no projects "run: macbuild scan, or macbuild add <name> <path>"
   names=$(grep -v '^#' "$PROJECTS" 2>/dev/null | grep '|' | cut -d'|' -f1 | while read -r name; do valid_name "$name" || printf '"%s" ' "$name"; done)
   [ -z "$names" ] || no names "rename ${names}in $PROJECTS: letters, digits, '.', '_' and '-' only"
@@ -77,33 +96,37 @@ case "${1:-}" in
   scan) scan_projects; exit 0;;
   doctor) doctor; exit $?;;
 esac
-NAME=""; PROFILE=""; FAST=0; SEND=0; INSTALL=0; TESTFLIGHT=0; OUT=""; REF=""
+NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) PROFILE="${2:?--profile needs a name}"; shift;;
+    --platform) PLATFORM="${2:?--platform needs ios or android}"; shift;;
+    --android) PLATFORM=android;;
     --output) OUT="${2:?--output needs a path}"; shift;;
     --ref) REF="${2:?--ref needs a branch or commit}"; shift;;
-    --fast) FAST=1;; --send) SEND=1;; --install) INSTALL=1;; --testflight) TESTFLIGHT=1;;
+    --screenshot) SCREENSHOT="${2:?--screenshot needs a path}"; shift;;
+    --fast) FAST=1;; --send) SEND=1;; --install) INSTALL=1;; --submit) SUBMIT=1;; --testflight) TESTFLIGHT=1; SUBMIT=1;;
+    --skip-unchanged) SKIP_UNCHANGED=1;;
     --list) cat "$PROJECTS" 2>/dev/null; exit 0;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0;;
     -*) echo "unknown option $1"; exit 2;;
     *) NAME="$1";;
   esac; shift
 done
-[ -n "$NAME" ] || { echo "usage: macbuild <project> [--install|--testflight|--fast|--send|--profile NAME]"; exit 2; }
-if [ "$TESTFLIGHT" = 1 ]; then PROFILE="${PROFILE:-production}"; fi
+[ -n "$NAME" ] || { echo "usage: macbuild <project> [--platform ios|android] [--install|--submit|--fast|--send|--profile NAME]"; exit 2; }
+case "$PLATFORM" in ios|android) ;; *) echo "--platform is ios or android"; exit 2;; esac
+[ "$TESTFLIGHT" = 0 ] || [ "$PLATFORM" = ios ] || { echo "--testflight is for iOS; use --submit to upload to Google Play"; exit 2; }
+[ "$SUBMIT" = 0 ] || [ "$SKIP_UNCHANGED" = 0 ] || { echo "--skip-unchanged can't go with --submit: the store needs a new build"; exit 2; }
+[ -z "$SCREENSHOT" ] || [ "$INSTALL" = 1 ] || { echo "--screenshot needs --install"; exit 2; }
+if [ "$SUBMIT" = 1 ]; then PROFILE="${PROFILE:-production}"; fi
 PROFILE="${PROFILE:-development}"
 APP_DIR=$(N="$NAME" awk -F'|' '$1==ENVIRON["N"]{print $2}' "$PROJECTS" 2>/dev/null); APP_DIR="${APP_DIR:-$HOME/Documents/$NAME}"
 [ -f "$APP_DIR/eas.json" ] || { echo "no eas.json in $APP_DIR"; exit 1; }
 DEVICE="${MACBUILD_DEVICE:-}"; TAILDROP="${MACBUILD_TAILDROP_TARGET:-}"
-# Settings used after the build are checked first, so a missing one doesn't waste the build.
-[ "$INSTALL" = 0 ] || [ -n "$DEVICE" ] || { echo "--install needs MACBUILD_DEVICE in $CONFIG/env (see: xcrun devicectl list devices)"; exit 2; }
 [ "$SEND" = 0 ] || [ -n "$TAILDROP" ] || { echo "--send needs MACBUILD_TAILDROP_TARGET in $CONFIG/env"; exit 2; }
 CACHE="$HOME/.cache/macbuild"; mkdir -p "$CACHE"
-LOG="${MACBUILD_LOG:-$HOME/Library/Logs/$NAME-ios-build-$PROFILE.log}"
-# This run's IPA: a path of its own, so a failed build can't pick up another build's output.
-BUILT="$CACHE/$NAME-$PROFILE.$$.ipa"
-LOCK="$CACHE/build.lock"; WORK=""; WORKTREE=""; WORKTREE_REPO=""; EAS_PID=""; WATCHER=""; FIFO=""; SNAP=""
+LOG="${MACBUILD_LOG:-$HOME/Library/Logs/$NAME-$PLATFORM-build-$PROFILE.log}"
+LOCK="$CACHE/build.lock"; BUILT=""; WORK=""; WORKTREE=""; WORKTREE_REPO=""; EAS_PID=""; WATCHER=""; FIFO=""; SNAP=""; SIM_DIR=""
 stop_eas() {
   # eas_pty.py passes the signal on to eas, then exits once eas has.
   local n=0
@@ -116,8 +139,9 @@ cleanup() {
   stop_eas
   [ -n "$WORKTREE" ] && git -C "$WORKTREE_REPO" worktree remove --force "$WORKTREE" 2>/dev/null
   [ -n "$WORK" ] && rm -rf "$WORK"
+  [ -n "$SIM_DIR" ] && rm -rf "$SIM_DIR"
   [ -n "$FIFO" ] && rm -f "$FIFO" "$SNAP"
-  rm -f "$BUILT"
+  [ -n "$BUILT" ] && rm -f "$BUILT"
   [ "$(readlink "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"
 }
 trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -147,7 +171,7 @@ take_lock
 # Metro's temp cache embeds the absolute work directory, which changes per build: the next build then fails to resolve modules.
 rm -rf "${TMPDIR:-/tmp}/metro-cache" "${TMPDIR:-/tmp}"/metro-file-map-* "${TMPDIR:-/tmp}"/haste-map-* 2>/dev/null
 # A temporary EAS keychain left by a dead build stays in the search list, locked, and codesign can pick it (errSecInternalComponent).
-if ! pgrep -f eas_pty.py >/dev/null; then
+if [ "$PLATFORM" = ios ] && ! pgrep -f eas_pty.py >/dev/null; then
   for k in $(security list-keychains -d user 2>/dev/null | tr -d '"' | grep '/eas-build-.*\.keychain'); do security delete-keychain "$k" 2>/dev/null; done
   rm -f "${TMPDIR:-/tmp}"/eas-build-*.keychain
 fi
@@ -156,10 +180,11 @@ fi
 for d in "$HOME"/.nvm/versions/node/*/bin /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin; do [ -d "$d" ] && PATH="$PATH:$d"; done
 [ -n "${MACBUILD_NODE:-}" ] && PATH="$HOME/.nvm/versions/node/$MACBUILD_NODE/bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"; unset DEVELOPER_DIR
+[ "$PLATFORM" = android ] && android_env
 # macbuild owns the EAS work directory: --fast keeps one per app and profile (cleared when the next one starts) and
 # every other build gets a fresh one, removed when it ends.
 if [ "$FAST" = 1 ]; then
-  export EAS_LOCAL_BUILD_WORKINGDIR="$CACHE/work-$NAME-$PROFILE"; rm -rf "$EAS_LOCAL_BUILD_WORKINGDIR"; mkdir -p "$EAS_LOCAL_BUILD_WORKINGDIR"
+  export EAS_LOCAL_BUILD_WORKINGDIR="$CACHE/work-$NAME-$PLATFORM-$PROFILE"; rm -rf "$EAS_LOCAL_BUILD_WORKINGDIR"; mkdir -p "$EAS_LOCAL_BUILD_WORKINGDIR"
   export XCODE_XCCONFIG_FILE="$ROOT/lib/fast.xcconfig"
 else
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/macbuild-work.XXXXXX") || exit 1
@@ -179,6 +204,7 @@ SPECS=(
   '? Would you like to set up Push Notifications|\u001b[B\n'
   '? Reuse this App Store Connect API Key|y\n'
   '? Apple ID:|\n'
+  '? Generate a new Android Keystore|y\n'
 )
 run_eas() {
   local status
@@ -240,42 +266,114 @@ checkout() {
 }
 # Drops terminal escape codes. The escape byte is written out ($'\033') because not every sed reads \x1b.
 clean() { sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' "$LOG"; }
+# After a failure: the known cause and its fix, when lib/diagnose.mjs recognises the error.
+explain() { node "$ROOT/lib/diagnose.mjs" "$LOG" 2>/dev/null | sed 's/^/  /'; }
+install_simulator() {
+  # Opens the app in MACBUILD_SIMULATOR, the booted simulator, or the first available iPhone, booting it if needed.
+  local app bundle device
+  SIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/macbuild-sim.XXXXXX") || return 1
+  tar -xzf "$ARTIFACT" -C "$SIM_DIR" || { echo "could not unpack the simulator build"; return 1; }
+  app=$(find "$SIM_DIR" -maxdepth 3 -name '*.app' -type d | head -n 1)
+  [ -n "$app" ] || { echo "no .app in the simulator build"; return 1; }
+  bundle=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist") || return 1
+  device=${MACBUILD_SIMULATOR:-booted}
+  if [ "$device" = booted ] && ! xcrun simctl list devices booted | grep -q Booted; then
+    device=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone[^(]*\([0-9A-F-]{36}\)' | grep -oE '[0-9A-F-]{36}')
+    [ -n "$device" ] || { echo "no iPhone simulator found; add one in Xcode"; return 1; }
+    xcrun simctl boot "$device" && open -a Simulator
+  fi
+  xcrun simctl install "$device" "$app" && xcrun simctl launch "$device" "$bundle" >/dev/null || return 1
+  echo "opened $bundle in the simulator"
+  if [ -n "$SCREENSHOT" ]; then sleep 8; xcrun simctl io "$device" screenshot "$SCREENSHOT" >/dev/null && echo "screenshot: $SCREENSHOT"; fi
+}
 if [ -n "$REF" ]; then
   checkout >> "$LOG" 2>&1 || { echo "checkout failed; log: $LOG"; tail -n 5 "$LOG"; exit 1; }
 fi
 cd "$APP_DIR" || exit 1
-echo "building $NAME ($PROFILE) on this Mac, log: $LOG"
-run_eas build --platform ios --profile "$PROFILE" --local --output "$BUILT"; STATUS=$?
-if [ ! -f "$BUILT" ]; then
-  echo "build failed (exit $STATUS); log: $LOG"; clean | grep -E "❌|error:|Error:" | head -8; exit 1
+# The profile decides the artifact: an IPA, a simulator .tar.gz, an APK or an AAB.
+EXT=""; SIMULATOR=0; MISSING=0
+while IFS='=' read -r key value; do
+  case "$key" in artifact) EXT=$value;; simulator) SIMULATOR=$value;; missing) MISSING=$value;; esac
+done < <(node "$ROOT/lib/profile.mjs" "$APP_DIR/eas.json" "$PROFILE" "$PLATFORM" 2>/dev/null)
+[ "$MISSING" = 0 ] || { echo "no build profile \"$PROFILE\" in $APP_DIR/eas.json"; exit 1; }
+if [ -z "$EXT" ]; then EXT=ipa; [ "$PLATFORM" = android ] && EXT=apk; fi
+# Settings used after the build are checked first, so a missing one doesn't waste the build.
+if [ "$INSTALL" = 1 ]; then
+  if [ "$PLATFORM" = android ]; then
+    [ "$EXT" = apk ] || { echo "--install needs an APK; this profile builds an AAB for Google Play (set android.buildType to apk)"; exit 2; }
+  elif [ "$SIMULATOR" = 0 ]; then
+    [ -n "$DEVICE" ] || { echo "--install needs MACBUILD_DEVICE in $CONFIG/env (see: xcrun devicectl list devices)"; exit 2; }
+  fi
 fi
-IPA="${OUT:-$HOME/Desktop/$NAME-$PROFILE.ipa}"
-mv "$BUILT" "$IPA" || { echo "could not move IPA to $IPA" >&2; exit 1; }
-echo "IPA: $IPA ($(du -h "$IPA" | cut -f1)) in $(( (SECONDS-START)/60 )) min"
+[ -z "$SCREENSHOT" ] || [ "$SIMULATOR" = 1 ] || { echo "--screenshot works with simulator builds"; exit 2; }
+[ "$SUBMIT" = 0 ] || [ "$SIMULATOR" = 0 ] || { echo "simulator builds can't be uploaded to the App Store"; exit 2; }
+# The native code's fingerprint: logged for the web UI, recorded after the build, and compared by --skip-unchanged.
+FP=$(node "$ROOT/lib/fingerprint.mjs" "$APP_DIR" "$PLATFORM" 2>/dev/null | tail -n 1)
+[ -n "$FP" ] && echo "macbuild: fingerprint $FP" >> "$LOG"
+SKIPPED=0; ARTIFACT=""
+if [ "$SKIP_UNCHANGED" = 1 ] && [ -n "$FP" ]; then
+  # The newest build with this fingerprint whose file is still there and still holds that build: a later build can
+  # overwrite the same path (the Desktop default), so a path counts only if its most recent record has this fingerprint.
+  ARTIFACT=$(N="$NAME" P="$PROFILE" PL="$PLATFORM" F="$FP" awk -F'|' '{ last[$5] = $4 }
+    $1 == ENVIRON["N"] && $2 == ENVIRON["P"] && $3 == ENVIRON["PL"] && $4 == ENVIRON["F"] { hits[++n] = $5 }
+    END { for (i = n; i > 0; i--) if (last[hits[i]] == ENVIRON["F"]) { print hits[i]; exit } }' "$FINGERPRINTS" 2>/dev/null)
+  if [ -n "$ARTIFACT" ] && [ -f "$ARTIFACT" ]; then
+    SKIPPED=1
+    echo "macbuild: unchanged since $ARTIFACT" >> "$LOG"
+    echo "native code unchanged since an earlier build; reusing $ARTIFACT"
+  else
+    ARTIFACT=""
+  fi
+fi
+if [ "$SKIPPED" = 0 ]; then
+  # This run's build: a path of its own, so a failed build can't pick up another build's output.
+  BUILT="$CACHE/$NAME-$PROFILE.$$.$EXT"
+  echo "building $NAME for $PLATFORM ($PROFILE) on this Mac, log: $LOG"
+  run_eas build --platform "$PLATFORM" --profile "$PROFILE" --local --output "$BUILT"; STATUS=$?
+  if [ ! -f "$BUILT" ]; then
+    echo "build failed (exit $STATUS); log: $LOG"; clean | grep -E "❌|error:|Error:|FAILURE" | head -8; explain; exit 1
+  fi
+  ARTIFACT="${OUT:-$HOME/Desktop/$NAME-$PROFILE.$EXT}"
+  mv "$BUILT" "$ARTIFACT" || { echo "could not move the build to $ARTIFACT" >&2; exit 1; }
+  BUILT=""
+  echo "built: $ARTIFACT ($(du -h "$ARTIFACT" | cut -f1)) in $(( (SECONDS-START)/60 )) min"
+  if [ -n "$FP" ]; then
+    mkdir -p "$(dirname "$FINGERPRINTS")"
+    printf '%s|%s|%s|%s|%s|%s\n' "$NAME" "$PROFILE" "$PLATFORM" "$FP" "$ARTIFACT" "$(date +%s)" >> "$FINGERPRINTS"
+  fi
+fi
 if [ "$SEND" = 1 ]; then
-  /Applications/Tailscale.app/Contents/MacOS/Tailscale file cp --name="$NAME-$PROFILE.ipa" "$IPA" "$TAILDROP:" || { echo "could not send to $TAILDROP" >&2; exit 1; }
+  /Applications/Tailscale.app/Contents/MacOS/Tailscale file cp --name="$(basename "$ARTIFACT")" "$ARTIFACT" "$TAILDROP:" || { echo "could not send to $TAILDROP" >&2; exit 1; }
   echo "sent to $TAILDROP"
 fi
 if [ "$INSTALL" = 1 ]; then
-  INSTALL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/macbuild-install.XXXXXX") || exit 1
-  if ! unzip -q "$IPA" 'Payload/*' -d "$INSTALL_DIR"; then
-    rm -rf "$INSTALL_DIR"; echo "could not extract app from IPA" >&2; exit 1
+  if [ "$PLATFORM" = android ]; then
+    ADB=(adb); [ -n "${MACBUILD_ANDROID_DEVICE:-}" ] && ADB+=(-s "$MACBUILD_ANDROID_DEVICE")
+    "${ADB[@]}" install -r "$ARTIFACT" || { echo "install failed: is a device connected with USB debugging on? (adb devices)" >&2; exit 1; }
+  elif [ "$SIMULATOR" = 1 ]; then
+    install_simulator || { echo "could not open the app in the simulator" >&2; exit 1; }
+  else
+    INSTALL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/macbuild-install.XXXXXX") || exit 1
+    if ! unzip -q "$ARTIFACT" 'Payload/*' -d "$INSTALL_DIR"; then
+      rm -rf "$INSTALL_DIR"; echo "could not extract app from IPA" >&2; exit 1
+    fi
+    APP_BUNDLES=("$INSTALL_DIR"/Payload/*.app)
+    if [ "${#APP_BUNDLES[@]}" -ne 1 ] || [ ! -d "${APP_BUNDLES[0]}" ]; then
+      rm -rf "$INSTALL_DIR"; echo "IPA must contain one app bundle" >&2; exit 1
+    fi
+    xcrun devicectl device install app --device "$DEVICE" "${APP_BUNDLES[0]}" 2>&1 | tail -6
+    STATUS=${PIPESTATUS[0]}
+    rm -rf "$INSTALL_DIR"
+    [ "$STATUS" = 0 ] || { echo "install failed (exit $STATUS)" >&2; exit "$STATUS"; }
   fi
-  APP_BUNDLES=("$INSTALL_DIR"/Payload/*.app)
-  if [ "${#APP_BUNDLES[@]}" -ne 1 ] || [ ! -d "${APP_BUNDLES[0]}" ]; then
-    rm -rf "$INSTALL_DIR"; echo "IPA must contain one app bundle" >&2; exit 1
-  fi
-  xcrun devicectl device install app --device "$DEVICE" "${APP_BUNDLES[0]}" 2>&1 | tail -6
-  STATUS=${PIPESTATUS[0]}
-  rm -rf "$INSTALL_DIR"
-  [ "$STATUS" = 0 ] || { echo "install failed (exit $STATUS)" >&2; exit "$STATUS"; }
 fi
-if [ "$TESTFLIGHT" = 1 ]; then
+if [ "$SUBMIT" = 1 ]; then
+  STORE="TestFlight"; [ "$PLATFORM" = android ] && STORE="Google Play"
   # The submit profile named like the build profile, else production (which eas.json may leave out).
-  SUBMIT=$(/usr/bin/python3 -c 'import json, sys; print(sys.argv[2] if sys.argv[2] in (json.load(open(sys.argv[1])).get("submit") or {}) else "production")' "$APP_DIR/eas.json" "$PROFILE" 2>/dev/null) || SUBMIT=production
-  echo "uploading to TestFlight (submit profile $SUBMIT)"
-  run_eas submit --platform ios --profile "$SUBMIT" --path "$IPA" --wait; STATUS=$?
+  SUBMIT_PROFILE=$(node -e 'const s = (JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).submit || {}); console.log(s[process.argv[2]] ? process.argv[2] : "production")' "$APP_DIR/eas.json" "$PROFILE" 2>/dev/null) || SUBMIT_PROFILE=production
+  echo "uploading to $STORE (submit profile ${SUBMIT_PROFILE:-production})"
+  run_eas submit --platform "$PLATFORM" --profile "${SUBMIT_PROFILE:-production}" --path "$ARTIFACT" --wait; STATUS=$?
   clean | tail -n 400 | grep -a -E 'Submitted your app|Submission details|failed|Error' | tail -4
-  [ $STATUS = 0 ] || { echo "upload failed (exit $STATUS); log: $LOG"; exit 1; }
+  [ $STATUS = 0 ] || { echo "upload failed (exit $STATUS); log: $LOG"; explain; exit 1; }
 fi
 exit 0
