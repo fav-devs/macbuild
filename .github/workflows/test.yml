@@ -1,0 +1,19 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS runs bin/macbuild on the bash 3.2 and BSD tools it ships with; Linux is the quicker check.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: runner.os == 'Linux'
+        run: shellcheck -S warning bin/macbuild bin/eas-guard install.sh install-ui.sh
+      - run: npm ci --prefix ui --no-audit --no-fund
+      - run: node --test test/*.test.mjs

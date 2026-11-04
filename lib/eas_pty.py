@@ -3,6 +3,7 @@ import json
 import os
 import pty
 import select
+import signal
 import sys
 
 apple_id = os.environ.get("MACBUILD_APPLE_ID")
@@ -12,11 +13,23 @@ if apple_id:
 if password_file and os.path.exists(password_file):
     with open(password_file) as source:
         os.environ["EXPO_APPLE_PASSWORD"] = source.read().rstrip("\r\n")
-os.environ["EAS_LOCAL_BUILD_SKIP_CLEANUP"] = "1"
 child_pid, terminal = pty.fork()
 if child_pid == 0:
     os.execvp("eas", ["eas"] + sys.argv[1:])
 os.environ.pop("EXPO_APPLE_PASSWORD", None)
+
+
+# eas leads its own session on the terminal, so a signal sent to macbuild's process group doesn't reach it, or the
+# fastlane and xcodebuild processes under it. Pass it on to that whole group, then exit once eas does.
+def stop(signum, _frame):
+    try:
+        os.killpg(child_pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
+for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(signum, stop)
 while True:
     ready, _, _ = select.select([terminal, sys.stdin], [], [])
     if terminal in ready:
