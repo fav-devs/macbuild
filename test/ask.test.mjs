@@ -79,6 +79,10 @@ if [ "$2" = show ]; then
 fi
 exit 0
 `, { mode: 0o755 });
+  const grok = spawnSync(MACBUILD, ['ask', id], { env: { ...env, MACBUILD_T3: join(home, 'bin/t3') }, encoding: 'utf8', timeout: 15000 });
+  assert.equal(grok.status, 0, grok.stdout + grok.stderr);
+  assert.match(readFileSync(join(home, 't3-calls'), 'utf8'), /thread start --json --title macbuild fix 20260104162904-myapp --provider grok --model grok-4\.6 /);
+  writeFileSync(join(home, 't3-calls'), '');
   const started = spawnSync(MACBUILD, ['ask', id, '--codex'], { env: { ...env, MACBUILD_T3: join(home, 'bin/t3') }, encoding: 'utf8', timeout: 15000 });
   assert.equal(started.status, 0, started.stdout + started.stderr);
   assert.match(started.stdout, /127\.0\.0\.1:3773/);
