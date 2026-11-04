@@ -149,6 +149,32 @@ test('a lock left by a build that died is taken over', () => {
   assert.doesNotMatch(result.stdout, /waiting/);
 });
 
+test('--ref prefers pnpm when packageManager says so, even with a leftover package-lock.json', () => {
+  const { home, run, cache } = sandbox();
+  writeFileSync(join(home, 'bin/pnpm'), '#!/bin/bash\necho "$*" >> "$HOME/pnpm-calls"\n', { mode: 0o755 });
+  writeFileSync(join(home, 'bin/npm'), '#!/bin/bash\necho "$*" >> "$HOME/npm-calls"\n', { mode: 0o755 });
+  const app = join(home, 'code/pnpmapp');
+  mkdirSync(join(app, 'node_modules'), { recursive: true });
+  writeFileSync(join(app, 'eas.json'), EAS_JSON);
+  writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'pnpmapp', packageManager: 'pnpm@9.15.0' }));
+  writeFileSync(join(app, 'package-lock.json'), '{ "name": "leftover" }\n');
+  writeFileSync(join(app, 'pnpm-lock.yaml'), 'lockfileVersion: "9.0"\n');
+  writeFileSync(join(app, '.gitignore'), 'node_modules\n');
+  git(home, 'init', '-q', '--bare', 'origin.git');
+  git(app, 'init', '-q', '-b', 'main');
+  git(app, 'add', '.');
+  git(app, 'commit', '-qm', 'first');
+  git(app, 'remote', 'add', 'origin', join(home, 'origin.git'));
+  git(app, 'push', '-q', 'origin', 'main');
+  run(['add', 'pnpmapp', app]);
+  const result = run(['pnpmapp', '--ref', 'main', '--output', join(home, 'out.ipa')]);
+  assert.equal(result.status, 0, result.stdout);
+  const log = readFileSync(join(home, 'Library/Logs/pnpmapp-ios-build-development.log'), 'utf8');
+  assert.match(log, /dependencies from pnpm-lock.yaml/);
+  assert.match(log, /dropping package-lock.json so eas uses pnpm-lock.yaml/);
+  assert.equal(existsSync(join(home, 'npm-calls')), false);
+});
+
 test('--ref builds a clean checkout of a monorepo app reached through a symlink', () => {
   const { home, run, calls, cache } = sandbox();
   const repo = join(home, 'code/mono');

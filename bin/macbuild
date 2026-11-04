@@ -405,10 +405,38 @@ run_eas() {
   kill "$WATCHER" 2>/dev/null; wait "$WATCHER" 2>/dev/null
   rm -f "$FIFO" "$SNAP"; EAS_PID=""; WATCHER=""; FIFO=""; SNAP=""; return $status
 }
+# Which lockfile eas should install from. package.json "packageManager" wins, then a pnpm workspace,
+# then the same order eas-cli uses (npm, yarn, pnpm, bun). Extra lockfiles are dropped in the worktree
+# so eas doesn't silently switch to npm because a leftover package-lock.json is sitting there.
+lockfile_of() {
+  local dir="$1" pm
+  pm=$(python3 -c '
+import json, os, sys
+try:
+    raw = str(json.load(open(os.path.join(sys.argv[1], "package.json"))).get("packageManager") or "")
+except Exception:
+    raw = ""
+print(raw.split("@")[0])
+' "$dir" 2>/dev/null || true)
+  case "$pm" in
+    pnpm) [ -f "$dir/pnpm-lock.yaml" ] && { echo pnpm-lock.yaml; return; } ;;
+    yarn) [ -f "$dir/yarn.lock" ] && { echo yarn.lock; return; } ;;
+    bun)
+      [ -f "$dir/bun.lock" ] && { echo bun.lock; return; }
+      [ -f "$dir/bun.lockb" ] && { echo bun.lockb; return; }
+      ;;
+    npm) [ -f "$dir/package-lock.json" ] && { echo package-lock.json; return; } ;;
+  esac
+  if [ -f "$dir/pnpm-workspace.yaml" ] && [ -f "$dir/pnpm-lock.yaml" ]; then echo pnpm-lock.yaml; return; fi
+  local f
+  for f in package-lock.json yarn.lock pnpm-lock.yaml bun.lock bun.lockb; do
+    [ -f "$dir/$f" ] && { echo "$f"; return; }
+  done
+}
 checkout() {
   # A worktree at the pushed commit: uncommitted files in the project never reach the build. EAS reads the app config from
   # here, which needs node_modules; the build itself installs its own. .env files are ignored by git, so they are copied.
-  local repo sub sha src app lock
+  local repo sub sha src app lock extra
   repo=$(git -C "$APP_DIR" rev-parse --show-toplevel) || return 1
   # The app's folder inside the repo, from git itself: APP_DIR may reach the repo through a symlink.
   sub=$(git -C "$APP_DIR" rev-parse --show-prefix); sub=${sub%/}
@@ -419,8 +447,16 @@ checkout() {
   git -C "$repo" worktree add -q --detach "$src" "$sha" || return 1
   WORKTREE_REPO=$repo; WORKTREE=$src
   for f in .env .env.local; do [ -f "$APP_DIR/$f" ] && cp "$APP_DIR/$f" "$app/$f"; done
-  for f in package-lock.json bun.lock bun.lockb pnpm-lock.yaml yarn.lock; do [ -f "$src/$f" ] && lock=$f && break; done
+  lock=$(lockfile_of "$src")
   echo "source: $REF at ${sha:0:7}, dependencies from ${lock:-no lockfile}"
+  if [ -n "$lock" ]; then
+    for extra in package-lock.json yarn.lock pnpm-lock.yaml bun.lock bun.lockb; do
+      [ "$extra" = "$lock" ] && continue
+      [ -f "$src/$extra" ] || continue
+      echo "dropping $extra so eas uses ${lock}"
+      rm -f "$src/$extra"
+    done
+  fi
   # Reuse the project's node_modules only when it matches this commit: another commit can need different packages.
   if [ -n "${lock:-}" ] && [ -d "$repo/node_modules" ] && cmp -s "$repo/$lock" "$src/$lock"; then
     ln -sfn "$repo/node_modules" "$src/node_modules"
