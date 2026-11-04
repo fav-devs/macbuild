@@ -43,6 +43,8 @@ Point your agent at this repo:
 
 > Set up macbuild on this Mac by following https://github.com/fav-devs/macbuild/blob/main/AGENTS.md
 
+`macbuild <name>` already waits until that CLI build finishes. For a dashboard job, run `macbuild wait` (or `macbuild wait <id>`). `--json` prints one object when it ends; `--follow` streams the log. `macbuild mcp` is a stdio MCP server with wait, show, builds and log.
+
 ## Use
 
 ```sh
@@ -79,6 +81,9 @@ macbuild list                                # your projects
 macbuild add myapp ~/code/myapp/apps/mobile  # the folder with eas.json; in a monorepo, the app's folder
 macbuild scan                                # find Expo apps in ~/Documents, ~/Developer, ~/Projects, ~/code and ~/src
 macbuild commit myapp --push                 # split local git changes with T3, then push
+macbuild wait                                # block until the latest dashboard job finishes
+macbuild wait myapp --json                   # same, as one JSON object
+macbuild mcp                                 # stdio MCP: wait, show, builds, log
 macbuild doctor                              # check the tools and logins builds need
 macbuild setup                               # dashboard, login, menu bar, and the same checks
 ```

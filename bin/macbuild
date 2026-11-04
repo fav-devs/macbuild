@@ -11,7 +11,7 @@
 #   --fast             fixed work directory + Xcode compilation caching, so later builds reuse compiled output
 #   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
 #   --output PATH      where the build goes (default: your Desktop)
-# Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show | commit <name> [--push]
+# Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show | wait | mcp | commit <name> [--push]
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 # Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
@@ -288,6 +288,8 @@ case "${1:-}" in
   builds) history builds "${2:-}" "${3:-}"; exit $?;;
   log) history log "${2:-}" "${3:-}"; exit $?;;
   show) history show "${2:-}" "${3:-}"; exit $?;;
+  wait) shift; exec node "$ROOT/lib/wait.mjs" "$@";;
+  mcp) exec node "$ROOT/lib/mcp.mjs";;
   commit) shift; commit_cmd "$@"; exit $?;;
 esac
 NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""
