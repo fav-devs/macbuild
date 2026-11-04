@@ -33,7 +33,8 @@ const dirOf = (id) => join(DATA, id);
 const metaOf = (id) => join(dirOf(id), 'meta.json');
 const validId = (id) => /^[0-9a-z-]+$/.test(id) && existsSync(metaOf(id));
 const read = (id) => JSON.parse(readFileSync(metaOf(id), 'utf8'));
-// Only this server writes meta.json, so the list is read from disk again only after a save or a prune.
+// The web UI writes meta.json, and so does `macbuild` for terminal / agent builds. Reload at HTTP list
+// boundaries so a CLI job shows up without waiting for this process to save().
 let buildsCache = null;
 const save = (build) => {
   writeFileSync(`${metaOf(build.id)}.tmp`, JSON.stringify(build));
@@ -41,6 +42,7 @@ const save = (build) => {
   buildsCache = null;
 };
 const allBuilds = () => (buildsCache ??= readdirSync(DATA).filter(validId).map(read).sort((a, b) => b.createdAt - a.createdAt));
+const reloadBuilds = () => { buildsCache = null; return allBuilds(); };
 const isActive = (build) => ACTIVE.includes(build.status);
 const platformOf = (build) => build.platform ?? 'ios';
 // Each build's file: app.ipa, app.tar.gz (iOS simulator), app.apk or app.aab. Builds from before Android were all IPAs.
@@ -263,6 +265,7 @@ async function commits(project, branch) {
   });
 }
 async function projectDetail(project) {
+  reloadBuilds();
   const repo = await repoOf(project.name);
   const repoSlug = await slug(repo);
   const remote = refresh(repo, repoSlug);
@@ -452,7 +455,7 @@ function maybeInstall(build) {
   installOnPhone(build, { wifiOnly: mode === 'wifi' }).catch((error) => console.error('install', build.id, error.message));
 }
 function menubarView() {
-  const builds = allBuilds();
+  const builds = reloadBuilds();
   const current = builds.find((item) => ['running', 'cancelling'].includes(item.status));
   const last = builds.find((item) => !ACTIVE.includes(item.status));
   return {
@@ -683,6 +686,7 @@ async function watchRules() {
   }
 }
 setInterval(() => watchRules().catch((error) => console.error('watch', error.message)), 60000);
+setInterval(() => { try { adoptCli(); } catch (error) { console.error('cli', error.message); } }, 2000);
 
 let current = null;
 const orphans = new Set();
@@ -715,8 +719,59 @@ function followOrphan(build) {
   };
   setTimeout(tick, 2000);
 }
+const cliDone = new Set();
+async function enrichCli(build) {
+  if (cliDone.has(build.id)) return;
+  cliDone.add(build.id);
+  if (build.status === 'success' && existsSync(artifactOf(build)) && !build.app) {
+    await inspect(build);
+    save(build);
+    build = read(build.id);
+  }
+  if (build.status === 'success') maybeInstall(build);
+  notify(build).catch((error) => console.error('notify', error.message));
+  sendWebhook(build).catch((error) => console.error('webhook', error.message));
+  const state = { success: 'success', skipped: 'success', failed: 'failure' }[build.status] ?? 'error';
+  const description = { success: `Built in ${minutesOf(build)}`, skipped: 'Native code unchanged; reused an earlier build', failed: build.hint?.title ?? build.reason ?? 'Failed' }[build.status] ?? 'Cancelled';
+  postStatus(build, state, description);
+}
+function followCli(build) {
+  if (orphans.has(build.id) || current?.id === build.id) return;
+  orphans.add(build.id);
+  const tracker = setInterval(() => trackPhases(build.id), 2000);
+  const tick = async () => {
+    let latest;
+    try { latest = read(build.id); } catch { clearInterval(tracker); orphans.delete(build.id); return; }
+    if (!isActive(latest)) {
+      clearInterval(tracker);
+      orphans.delete(build.id);
+      try { await enrichCli(latest); } catch (error) { console.error('cli', build.id, error.message); }
+      if (!orphans.size) { prune(); next(); }
+      return;
+    }
+    if (!logFresh(build.id, 45000)) {
+      clearInterval(tracker);
+      orphans.delete(build.id);
+      save({ ...latest, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
+      if (!orphans.size) next();
+      return;
+    }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 2000);
+}
+function adoptCli() {
+  for (const build of reloadBuilds()) {
+    if (build.trigger === 'cli' && isActive(build)) followCli(build);
+  }
+}
 async function recoverInterrupted() {
   for (const build of allBuilds()) {
+    if (build.trigger === 'cli') {
+      if (isActive(build) && logFresh(build.id)) followCli(build);
+      else if (isActive(build)) save({ ...build, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
+      continue;
+    }
     const restartFail = build.status === 'failed' && build.reason === 'The UI restarted during this build';
     if (!['running', 'cancelling'].includes(build.status) && !restartFail) continue;
     const text = logText(build.id);
@@ -735,6 +790,7 @@ async function recoverInterrupted() {
 }
 async function next() {
   if (current || orphans.size) return;
+  if (allBuilds().some((build) => build.trigger === 'cli' && isActive(build))) return;
   const build = allBuilds().findLast((candidate) => candidate.status === 'queued');
   if (!build) return;
   const args = [build.project, '--platform', platformOf(build), '--profile', build.profile, '--fast', '--output', artifactOf(build)];
@@ -799,12 +855,13 @@ async function finish(build, code) {
 function cancel(id) {
   const build = read(id);
   if (build.status === 'queued') return save({ ...build, status: 'cancelled', finishedAt: Date.now() });
-  if (current?.id !== id && !orphans.has(id)) return;
+  const cli = build.trigger === 'cli' && isActive(build);
+  if (current?.id !== id && !orphans.has(id) && !cli) return;
   save({ ...build, status: 'cancelling' });
-  const pid = current?.id === id ? current.child?.pid : null;
+  const pid = current?.id === id ? current.child?.pid : (cli ? build.pid : null);
   if (pid) {
-    try { process.kill(-pid, 'SIGTERM'); } catch {}
-    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch {} }, 5000);
+    try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
+    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 5000);
     return;
   }
   spawn('pkill', ['-TERM', '-f', logPath(id)], { stdio: 'ignore' });
@@ -961,11 +1018,11 @@ async function api(req, res, url) {
     return json(res, 200, { count: subscription ? others.length + 1 : others.length });
   }
   if (url.pathname === '/api/state' && req.method === 'GET') {
-    const builds = allBuilds();
+    const builds = reloadBuilds();
     return json(res, 200, { projects: await Promise.all(projects().map(describe)), builds: builds.slice(0, 200).map(withEstimate) });
   }
   // The build list alone, for the page that polls it: /api/state also runs git in every project.
-  if (url.pathname === '/api/builds' && req.method === 'GET') return json(res, 200, { builds: allBuilds().slice(0, 200).map(withEstimate) });
+  if (url.pathname === '/api/builds' && req.method === 'GET') return json(res, 200, { builds: reloadBuilds().slice(0, 200).map(withEstimate) });
   // Project names, icons and latest builds, without git: the sidebar asks for this on every page.
   if (url.pathname === '/api/projects' && req.method === 'GET') {
     const builds = allBuilds();

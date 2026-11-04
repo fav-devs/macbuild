@@ -43,7 +43,7 @@ Point your agent at this repo:
 
 > Set up macbuild on this Mac by following https://github.com/fav-devs/macbuild/blob/main/AGENTS.md
 
-`macbuild <name>` already waits until that CLI build finishes. For a dashboard job, run `macbuild wait` (or `macbuild wait <id>`). `--json` prints one object when it ends; `--follow` streams the log. `macbuild mcp` is a stdio MCP server with wait, show, builds and log.
+`macbuild <name>` already waits until that CLI build finishes, and the dashboard lists it with the rest. For a job that's already running, run `macbuild wait` (or `macbuild wait <id>`). `--json` prints one object when it ends; `--follow` streams the log. `macbuild mcp` is a stdio MCP server with wait, show, builds and log.
 
 ## Use
 

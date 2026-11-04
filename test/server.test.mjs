@@ -168,6 +168,21 @@ test('a restart adopts a detached build that already succeeded', async () => {
   assert.equal(finished.reason, undefined);
 });
 
+test('a CLI job on disk shows up in the dashboard', async () => {
+  const id = '20260104121212-cli-app';
+  mkdirSync(join(dir, 'builds', id), { recursive: true });
+  writeFileSync(join(dir, 'builds', id, 'meta.json'), JSON.stringify({
+    id, project: 'my_app', platform: 'ios', action: 'build', profile: 'development', artifact: 'app.ipa',
+    trigger: 'cli', status: 'success', createdAt: Date.now(), startedAt: Date.now() - 1000, finishedAt: Date.now(),
+  }));
+  writeFileSync(join(dir, 'builds', id, 'build.log'), 'Build successful\n');
+  const listed = await request('/api/builds');
+  assert.ok(listed.json.builds.some((build) => build.id === id && build.trigger === 'cli'));
+  const { json } = await request(`/api/builds/${id}`);
+  assert.equal(json.trigger, 'cli');
+  assert.equal(json.status, 'success');
+});
+
 test('a project named with an underscore builds', async () => {
   const created = await request('/api/builds', { method: 'POST', body: { project: 'my_app', profile: 'development' } });
   assert.equal(created.status, 201);

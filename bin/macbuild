@@ -323,6 +323,7 @@ DEVICE="${MACBUILD_DEVICE:-}"; TAILDROP="${MACBUILD_TAILDROP_TARGET:-}"
 CACHE="$HOME/.cache/macbuild"; mkdir -p "$CACHE"
 LOG="${MACBUILD_LOG:-$HOME/Library/Logs/$NAME-$PLATFORM-build-$PROFILE.log}"
 LOCK="$CACHE/build.lock"; BUILT=""; WORK=""; WORKTREE=""; WORKTREE_REPO=""; EAS_PID=""; WATCHER=""; FIFO=""; SNAP=""; SIM_DIR=""
+JOB_ID=""; JOB_STATUS=failed; JOB_RECORDED=""
 stop_eas() {
   # eas_pty.py passes the signal on to eas, then exits once eas has.
   local n=0
@@ -331,8 +332,23 @@ stop_eas() {
   kill "$EAS_PID" 2>/dev/null
   while kill -0 "$EAS_PID" 2>/dev/null && [ $n -lt 20 ]; do sleep 0.5; n=$((n + 1)); done
 }
+history_start() {
+  # Dashboard jobs already have a folder; MACBUILD_LOG means the web UI owns this run.
+  local key value
+  JOB_ID=""
+  while IFS='=' read -r key value; do
+    case "$key" in id) JOB_ID=$value;; log) LOG=$value;; esac
+  done < <(node "$ROOT/lib/history.mjs" start --project "$NAME" --profile "$PROFILE" --platform "$PLATFORM" --dir "$APP_DIR" ${REF:+--ref "$REF"} --action "$([ "$SUBMIT" = 1 ] && echo submit || echo build)" --pid "$$")
+  [ -n "$JOB_ID" ] && [ -n "$LOG" ]
+}
+history_finish() {
+  [ -n "${JOB_ID:-}" ] && [ -z "${JOB_RECORDED:-}" ] || return 0
+  JOB_RECORDED=1
+  node "$ROOT/lib/history.mjs" finish "$JOB_ID" --status "$JOB_STATUS" ${ARTIFACT:+--artifact "$ARTIFACT"} >/dev/null 2>&1 || true
+}
 cleanup() {
   stop_eas
+  history_finish
   [ -n "$WORKTREE" ] && git -C "$WORKTREE_REPO" worktree remove --force "$WORKTREE" 2>/dev/null
   [ -n "$WORK" ] && rm -rf "$WORK"
   [ -n "$SIM_DIR" ] && rm -rf "$SIM_DIR"
@@ -340,7 +356,7 @@ cleanup() {
   [ -n "$BUILT" ] && rm -f "$BUILT"
   [ "$(readlink "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"
 }
-trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+trap cleanup EXIT; trap 'JOB_STATUS=cancelled; exit 130' INT; trap 'JOB_STATUS=cancelled; exit 143' TERM; trap 'JOB_STATUS=cancelled; exit 129' HUP
 # One build at a time on this Mac, whether it was started here, by an agent or from the web UI: builds share the Metro
 # cache, keychains and work directories, and each one uses the whole machine. The lock is a symlink to the owner's pid.
 take_lock() {
@@ -350,7 +366,7 @@ take_lock() {
     if [ -n "$owner" ] && ps -p "$owner" -o command= 2>/dev/null | grep -q macbuild; then
       if [ "$said" = 0 ]; then
         said=1; echo "waiting for the build already running on this Mac (pid $owner)"
-        [ -n "$OWN_LOG" ] && echo "waiting for the build already running on this Mac (pid $owner)" >> "$LOG"
+        echo "waiting for the build already running on this Mac (pid $owner)" >> "$LOG"
       fi
       sleep 5
     elif [ "$(readlink "$LOCK" 2>/dev/null)" = "$owner" ]; then
@@ -360,10 +376,23 @@ take_lock() {
 }
 # The default log is shared by every build of this app and profile, so it is cleared only once this build holds the
 # lock: clearing it earlier would erase the running build's prompts. A log the web UI passes is this build's alone.
+# A terminal build also writes ~/.local/share/macbuild/builds so the dashboard can show it.
 OWN_LOG=${MACBUILD_LOG:+1}
-[ -n "$OWN_LOG" ] && : > "$LOG"
+if [ -n "$OWN_LOG" ]; then
+  : > "$LOG"
+else
+  history_start || true
+  mkdir -p "$(dirname "$LOG")"
+  : > "$LOG"
+  if [ -n "$JOB_ID" ]; then
+    mkdir -p "$HOME/Library/Logs"
+    ln -sfn "$LOG" "$HOME/Library/Logs/$NAME-$PLATFORM-build-$PROFILE.log"
+  fi
+fi
 take_lock
-[ -n "$OWN_LOG" ] || : > "$LOG"
+if [ -z "$OWN_LOG" ] && [ -z "$JOB_ID" ]; then
+  : > "$LOG"
+fi
 # Metro's temp cache embeds the absolute work directory, which changes per build: the next build then fails to resolve modules.
 rm -rf "${TMPDIR:-/tmp}/metro-cache" "${TMPDIR:-/tmp}"/metro-file-map-* "${TMPDIR:-/tmp}"/haste-map-* 2>/dev/null
 # A temporary EAS keychain left by a dead build stays in the search list, locked, and codesign can pick it (errSecInternalComponent).
@@ -532,6 +561,9 @@ while IFS='=' read -r key value; do
 done < <(node "$ROOT/lib/profile.mjs" "$APP_DIR/eas.json" "$PROFILE" "$PLATFORM" 2>/dev/null)
 [ "$MISSING" = 0 ] || { echo "no build profile \"$PROFILE\" in $APP_DIR/eas.json"; exit 1; }
 if [ -z "$EXT" ]; then EXT=ipa; [ "$PLATFORM" = android ] && EXT=apk; fi
+if [ -n "$JOB_ID" ]; then
+  node "$ROOT/lib/history.mjs" patch "$JOB_ID" --artifact "app.$EXT" --simulator "$SIMULATOR" >/dev/null 2>&1 || true
+fi
 # eas.json profile env (merged with extends). eas-cli's local fingerprint and the
 # in-build one both evaluate app.config.js, so APP_VARIANT and friends must be set here.
 export EAS_BUILD_PROFILE="$PROFILE"
@@ -627,4 +659,5 @@ if [ "$SUBMIT" = 1 ]; then
   clean | tail -n 400 | grep -a -E 'Submitted your app|Submission details|failed|Error' | tail -4
   [ $STATUS = 0 ] || { echo "upload failed (exit $STATUS); log: $LOG"; explain; exit 1; }
 fi
+if [ "$SKIPPED" = 1 ]; then JOB_STATUS=skipped; else JOB_STATUS=success; fi
 exit 0

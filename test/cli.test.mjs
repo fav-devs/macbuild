@@ -103,6 +103,13 @@ test('a build answers the prompt, delivers the IPA and cleans up', () => {
   assert.deepEqual(readdirSync(cache).filter((file) => file.endsWith('.ipa') || file === 'build.lock'), []);
   assert.deepEqual(readdirSync(join(home, 'tmp')).filter((file) => file.startsWith('macbuild-')), []);
   assert.ok(existsSync(join(home, 'Library/Logs/myapp-ios-build-development.log')));
+  const jobs = readdirSync(join(home, '.local/share/macbuild/builds'));
+  assert.equal(jobs.length, 1);
+  const meta = JSON.parse(readFileSync(join(home, '.local/share/macbuild/builds', jobs[0], 'meta.json'), 'utf8'));
+  assert.equal(meta.status, 'success');
+  assert.equal(meta.trigger, 'cli');
+  assert.equal(meta.project, 'myapp');
+  assert.equal(readFileSync(join(home, '.local/share/macbuild/builds', jobs[0], 'app.ipa'), 'utf8'), 'IPA\n');
 });
 
 test('a failed build reports the failure', () => {
@@ -113,6 +120,11 @@ test('a failed build reports the failure', () => {
   assert.equal(result.status, 1);
   assert.match(result.stdout, /build failed/);
   assert.equal(existsSync(out), false);
+  const jobs = readdirSync(join(home, '.local/share/macbuild/builds'));
+  assert.equal(jobs.length, 1);
+  const meta = JSON.parse(readFileSync(join(home, '.local/share/macbuild/builds', jobs[0], 'meta.json'), 'utf8'));
+  assert.equal(meta.status, 'failed');
+  assert.equal(meta.trigger, 'cli');
 });
 
 test('--install without a device stops before building', () => {
@@ -225,10 +237,13 @@ test('a simulator profile builds a .tar.gz, and an unknown profile is refused', 
   const missing = run(['myapp', '--profile', 'nope']);
   assert.equal(missing.status, 1);
   assert.match(missing.stdout, /no build profile "nope"/);
+  const data = join(home, '.local/share/macbuild/builds');
+  const before = readdirSync(data).length;
   const uiLog = join(home, 'ui.log');
   const hidden = run(['myapp', '--profile', 'nope'], { MACBUILD_LOG: uiLog });
   assert.equal(hidden.status, 1);
   assert.match(readFileSync(uiLog, 'utf8'), /no build profile "nope"/);
+  assert.equal(readdirSync(data).length, before);
 });
 
 test('builds, log and show read dashboard history', () => {

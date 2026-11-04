@@ -103,7 +103,7 @@ const short = (build) => build.commit?.short ?? '';
 const refOf = (build) => build.ref ?? '';
 const subject = (build) => build.commit?.subject || 'Working copy';
 const took = (build) => (build.startedAt && build.finishedAt ? span(build.finishedAt - build.startedAt) : '');
-const TRIGGERS = { manual: 'Started by hand', push: 'Push to branch', pr: 'Pull request', nightly: 'Nightly build', rebuild: 'Rebuild' };
+const TRIGGERS = { manual: 'Started by hand', push: 'Push to branch', pr: 'Pull request', nightly: 'Nightly build', rebuild: 'Rebuild', cli: 'CLI' };
 const triggerOf = (build) => (build.by?.name ? `${esc(build.by.name)}${build.trigger === 'rebuild' ? ' <span class="faint">(rebuild)</span>' : ''}` : esc(TRIGGERS[build.trigger] ?? 'Started by hand'));
 const kindOf = (build) => (submits(build) ? storeName(build.platform) : build.profile);
 const platformName = (build) => (build.platform === 'android' ? 'Android' : build.simulator ? 'iOS Simulator' : 'iOS');
