@@ -674,7 +674,7 @@ const PROJECT_SECTIONS = {
       <div class="section"><div class="section-head"><h2>Registered devices</h2><span class="faint">Your Apple team, through Expo</span></div><div class="card" id="devices">${skeleton(3)}</div>
       <p class="hint">EAS manages the certificates and profiles; macbuild reads them from the IPAs it builds. To add a device, run <span class="code">eas device:create</span>.</p></div>`;
     withExpo(data.name, $('#devices'), (expo) => (expo.devices.length ? `<div class="rows">${expo.devices.map((item) => `<div class="row compact"><span class="st">${icon(item.kind === 'IPAD' ? 'tablet' : 'phone')}</span><span class="main"><span class="title">${esc(item.name)}</span><span class="meta">${esc({ IPHONE: 'iPhone', IPAD: 'iPad' }[item.kind] ?? item.kind ?? '')}<span class="sep"></span><span class="mono">…${esc(item.udid ?? '')}</span></span></span></div>`).join('')}</div>`
-      : empty('phone', 'No devices listed', 'Set MACBUILD_APPLE_TEAM for the web UI to list your team’s devices.')));
+      : empty('phone', 'No devices listed', 'To list your team’s devices here, add your Apple Team ID as <code>"appleTeam"</code> in <code>~/.config/macbuild/ui.json</code>.')));
   },
   async environment(data, box) {
     box.innerHTML = `<div class="stack" id="env">${skeleton(4)}</div>`;

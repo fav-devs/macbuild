@@ -24,7 +24,7 @@ With the web UI, and a block on EAS cloud builds:
 curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh | bash -s -- --ui --guard
 ```
 
-The installer finds Expo apps in your usual project folders, then runs `macbuild doctor` to show anything missing.
+The installer finds Expo apps in your usual project folders, then runs `macbuild doctor` to show anything missing. Run the same command again to update.
 
 You need a Mac with Xcode, Node.js, CocoaPods, fastlane, `eas-cli` (signed in with `eas login`) and an Apple Developer account. GitHub CLI and Tailscale are optional.
 
@@ -44,22 +44,42 @@ macbuild myapp --testflight --ref main  # production build, uploaded to TestFlig
 macbuild myapp --profile preview --fast # any eas.json profile, reusing compiled output
 ```
 
+| Option | What it does |
+|---|---|
+| `--profile NAME` | The `eas.json` build profile. Default `development`, or `production` with `--testflight`. |
+| `--ref REF` | Build a pushed branch, tag or commit in a clean checkout. Uncommitted files never go in. |
+| `--install` | Install the build on the iPhone set in `MACBUILD_DEVICE`. |
+| `--send` | Send the IPA to the device set in `MACBUILD_TAILDROP_TARGET` with Taildrop. |
+| `--testflight` | Upload to TestFlight after the build, with the `eas.json` submit profile named like the build profile, or `production`. |
+| `--fast` | Keep one work folder per app and profile and turn on Xcode's compilation cache, so later builds reuse compiled output. |
+| `--output PATH` | Where the IPA goes. Default: your Desktop. |
+
 Managing projects:
 
 ```sh
-macbuild list
-macbuild add myapp ~/code/myapp/apps/mobile
-macbuild scan
-macbuild doctor
+macbuild list                                # your projects
+macbuild add myapp ~/code/myapp/apps/mobile  # the folder with eas.json; in a monorepo, the app's folder
+macbuild scan                                # find Expo apps in ~/Documents, ~/Developer, ~/Projects, ~/code and ~/src
+macbuild doctor                              # check the tools and logins builds need
 ```
 
-The IPA lands on your Desktop. Projects are in `~/.config/macbuild/projects.conf`, settings in `~/.config/macbuild/env`. Project names use letters, digits, `.`, `_` and `-`.
+Project names use letters, digits, `.`, `_` and `-`.
 
-`--testflight` submits with the `eas.json` submit profile named like the build profile, or `production` if there isn't one.
+## Settings
+
+Optional, in `~/.config/macbuild/env`. The file stays on your Mac; never commit it.
+
+| Setting | What it's for |
+|---|---|
+| `MACBUILD_APPLE_ID` | Your Apple ID, so builds don't stop to ask for it. |
+| `MACBUILD_APPLE_PASSWORD_FILE` | A file holding that Apple ID's password. Leave both empty to use EAS's saved session. |
+| `MACBUILD_DEVICE` | The iPhone for `--install`, from `xcrun devicectl list devices`. |
+| `MACBUILD_TAILDROP_TARGET` | The Tailscale device name for `--send`. |
+| `MACBUILD_NODE` | The nvm Node version to build with, such as `v22.17.0`. Default: the `node` on your PATH. |
 
 ## Web UI
 
-Install with `--ui` to run the dashboard at login. With Tailscale it's published on your tailnet only, at `https://<your-mac>:8443`. Open it in Safari on your iPhone and add it to your Home Screen.
+Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on the Mac. With Tailscale it's also published on your tailnet only, at `https://<your-mac>.<tailnet>.ts.net:8443`. Open that in Safari on your iPhone and add it to your Home Screen.
 
 - Start builds from any branch, commit and `eas.json` profile
 - Follow a build live: its current phase, the time left going by your usual build time, and logs grouped by phase on a timeline
@@ -74,6 +94,13 @@ Install with `--ui` to run the dashboard at login. With Tailscale it's published
 
 Installing from the page needs HTTPS, which Tailscale provides, and a device in the app's provisioning profile.
 
+A few things the dashboard reads:
+
+- **App icons** come from `expo.ios.icon` or `expo.icon` in `app.json`. Apps configured only with `app.config.js` or `app.config.ts` get a monogram instead.
+- **Registered devices** on a project's Signing page need your Apple Team ID. Add `"appleTeam": "ABCDE12345"` to `~/.config/macbuild/ui.json`.
+- **PR and CI details** need the GitHub CLI, signed in with `gh auth login`.
+- **Other ports:** set `MACBUILD_UI_PORT` (default 4180) or `MACBUILD_UI_HTTPS_PORT` (default 8443) when you run the installer with `--ui`.
+
 ## Security
 
 **The web UI has no login.** Anyone who can reach it can start builds and download your IPAs. It listens on `127.0.0.1` and is meant to be shared only through your private tailnet. Never put it on the public internet, and don't turn on Tailscale Funnel for it. It answers only requests addressed to `localhost`, `127.0.0.1` or a `*.ts.net` name, which stops other websites from reaching it through DNS rebinding. To use another name, list it in `MACBUILD_UI_HOSTS` (comma-separated) in `~/Library/LaunchAgents/local.macbuild.ui.plist`.
@@ -83,16 +110,42 @@ Signing credentials stay with EAS and your Mac. Your Apple password, if you set 
 ## Good to know
 
 - Builds run one at a time and use your whole Mac. A build started while another is running, from the terminal, an agent or the web UI, waits for it.
-- `--testflight` uses `eas submit`, so Expo's servers do the upload to Apple. The build itself is local.
+- The first build of a new app can stop at a signing question macbuild doesn't answer. If its log stops moving, run `eas credentials` once in a terminal, then build again.
+- `--testflight` uses `eas submit`, so Expo's servers do the upload to Apple. The build itself is local, and Apple still has to process the build before it shows up in TestFlight.
 - macbuild still uses your Expo account for credentials and project settings. It replaces EAS's build machines, not the rest of EAS.
 - iOS only for now.
 - `--guard` wraps the global `eas` command so `eas build` needs `--local`, and `eas build:dev`, `build:resign` and `workflow:run` are refused. It doesn't stop `npx eas-cli`. Remove it with `install.sh --unguard`, and run `--guard` again after updating `eas-cli`.
+
+## Files
+
+| Path | What's there |
+|---|---|
+| `~/.config/macbuild/projects.conf` | Your projects, one `name\|path` per line |
+| `~/.config/macbuild/env` | The settings above |
+| `~/.config/macbuild/ui.json` | Web UI build-on-push rules, notification keys and `appleTeam` |
+| `~/.local/share/macbuild/builds` | Web UI build history: the last 200 builds, with IPAs for the last 10 |
+| `~/.cache/macbuild` | Work folders and checkouts. Safe to delete between builds. |
+| `~/Library/Logs/<name>-ios-build-<profile>.log` | The log of the last terminal build of each app and profile |
+| `~/Library/Logs/macbuild-ui.log` | The web UI's own log |
 
 ## Uninstall
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh | bash -s -- --uninstall
 ```
+
+This removes the command, the `eas` wrapper, the web UI service and `~/.cache/macbuild`. It keeps your settings and build history; delete `~/.macbuild`, `~/.config/macbuild` and `~/.local/share/macbuild` to clear everything.
+
+## Develop
+
+```sh
+git clone https://github.com/fav-devs/macbuild.git && cd macbuild
+npm ci --prefix ui
+node ui/demo/demo.mjs        # the dashboard with sample projects and a build running, at http://localhost:4181
+node --test test/*.test.mjs  # tests for the CLI and the web UI's server
+```
+
+The demo uses stand-ins for `eas`, `gh` and GitHub, so it runs on any machine and never touches your projects. The screenshots above come from it. CI runs the tests on Linux and macOS, plus `shellcheck` on the scripts. [AGENTS.md](AGENTS.md) has notes on how the pieces fit together.
 
 ## License
 
