@@ -147,15 +147,8 @@ setup_cmd() {
   fi
   if [ "$do_bar" = 1 ]; then
     [ "$(uname)" = Darwin ] || { echo "menu bar needs macOS"; return 1; }
-    if [ ! -x "$BAR_BIN" ] || [ ! -f "$BAR_PLIST" ]; then
-      [ -f "$ROOT/install-ui.sh" ] || { echo "install-ui.sh missing"; return 1; }
-      "$ROOT/install-ui.sh" --menubar-only || return 1
-    else
-      set_plist_login "$BAR_PLIST" true || true
-      save_login_pref "$(saved_login)" true
-      bootout_agent "$BAR_LABEL"
-      bootstrap_agent "$BAR_PLIST"
-    fi
+    [ -f "$ROOT/install-ui.sh" ] || { echo "install-ui.sh missing"; return 1; }
+    "$ROOT/install-ui.sh" --menubar-only || return 1
     echo "menu bar on"
   fi
   if [ "$do_bar" = 0 ]; then

@@ -14,7 +14,7 @@ URL=${HOST:+https://$HOST:$HTTPS}; URL=${URL:-http://localhost:$PORT}
 NODE=$(command -v node)
 LOGIN=$(saved_login)
 PATH_ENV="$(dirname "$NODE"):$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-mkdir -p "$HOME/Library/Logs" "$AGENTS_DIR" "$(dirname "$BAR_BIN")"
+mkdir -p "$HOME/Library/Logs" "$AGENTS_DIR" "$(dirname "$BAR_BIN")" "$HOME/.local/bin"
 
 write_ui_plist() {
   cat > "$UI_PLIST" <<PL
@@ -57,7 +57,13 @@ PL
 
 compile_menubar() {
   command -v swiftc >/dev/null || { echo "menu bar skipped: install Xcode for swiftc"; return 1; }
+  mkdir -p "$(dirname "$BAR_BIN")"
+  cp "$HERE/macos/Info.plist" "$BAR_APP/Contents/Info.plist"
   swiftc -O -o "$BAR_BIN" "$HERE/macos/menubar.swift"
+  ln -sfn "$BAR_BIN" "$BAR_LINK"
+  if command -v codesign >/dev/null; then
+    codesign -s - --force --identifier dev.fav.macbuild.menubar "$BAR_BIN" >/dev/null 2>&1 || true
+  fi
 }
 
 install_menubar() {

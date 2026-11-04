@@ -26,6 +26,7 @@ if [ "$UNINSTALL" = 1 ]; then
   launchctl bootout "gui/$(id -u)/local.macbuild.ui" 2>/dev/null || true
   launchctl bootout "gui/$(id -u)/local.macbuild.menubar" 2>/dev/null || true
   rm -f "$PLIST" "$HOME/Library/LaunchAgents/local.macbuild.menubar.plist" "$HOME/.local/bin/macbuild" "$HOME/.local/bin/macbuild-menubar"
+  rm -rf "$HOME/.local/share/macbuild/macbuild-menubar.app"
   TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale; [ -x "$TS" ] || TS=$(command -v tailscale || true)
   [ -n "$TS" ] && "$TS" serve --https="$HTTPS" off 2>/dev/null || true
   # Work directories, checkouts and temporary IPAs: often the largest thing macbuild leaves.

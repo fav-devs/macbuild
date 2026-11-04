@@ -155,7 +155,8 @@ Signing credentials stay with EAS and your Mac. Your Apple password, if you set 
 | `~/Library/Logs/<name>-<platform>-build-<profile>.log` | The log of the last terminal build of each app, platform and profile |
 | `~/Library/Logs/macbuild-ui.log` | The web UI's own log |
 | `~/Library/Logs/macbuild-menubar.log` | The menu bar extra |
-| `~/.local/bin/macbuild-menubar` | Menu bar binary, compiled on this Mac |
+| `~/.local/share/macbuild/macbuild-menubar.app` | Menu bar extra (compiled on this Mac) |
+| `~/.local/bin/macbuild-menubar` | Symlink to that app’s binary |
 
 ## Uninstall
 

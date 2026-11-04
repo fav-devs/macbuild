@@ -5,7 +5,9 @@ BAR_LABEL=local.macbuild.menubar
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 UI_PLIST="$AGENTS_DIR/$UI_LABEL.plist"
 BAR_PLIST="$AGENTS_DIR/$BAR_LABEL.plist"
-BAR_BIN="$HOME/.local/bin/macbuild-menubar"
+BAR_APP="$HOME/.local/share/macbuild/macbuild-menubar.app"
+BAR_BIN="$BAR_APP/Contents/MacOS/macbuild-menubar"
+BAR_LINK="$HOME/.local/bin/macbuild-menubar"
 
 agent_loaded() { launchctl print "$UID_GUI/$1" >/dev/null 2>&1; }
 

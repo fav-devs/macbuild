@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var port: String { ProcessInfo.processInfo.environment["MACBUILD_UI_PORT"] ?? "4180" }
     func api(_ path: String) -> URL { URL(string: "http://127.0.0.1:\(port)\(path)")! }
+    // Naked binaries have no bundle id; currentNotificationCenter asserts and then SIGSEGVs.
+    var canNotify: Bool { Bundle.main.bundleIdentifier != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -39,7 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button?.toolTip = "macbuild"
         menu.delegate = self
         item.menu = menu
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        if canNotify {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(timer!, forMode: .common)
@@ -84,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func notifyIfNeeded() {
         if let current = snapshot.current, let id = current["id"] as? String { seenCurrent = id; return }
-        guard snapshot.reachable, let last = snapshot.last else { return }
+        guard canNotify, snapshot.reachable, let last = snapshot.last else { return }
         let id = last["id"] as? String ?? ""
         let status = last["status"] as? String ?? ""
         guard !seenCurrent.isEmpty, seenCurrent == id, id != lastNotified, ["success", "failed", "cancelled"].contains(status) else { return }

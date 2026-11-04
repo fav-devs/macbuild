@@ -366,7 +366,7 @@ const settingsView = () => {
 
 const UI_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.ui.plist');
 const BAR_PLIST = join(homedir(), 'Library/LaunchAgents/local.macbuild.menubar.plist');
-const BAR_BIN = join(homedir(), '.local/bin/macbuild-menubar');
+const BAR_BIN = join(homedir(), '.local/share/macbuild/macbuild-menubar.app/Contents/MacOS/macbuild-menubar');
 const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
 const localUrl = () => `http://127.0.0.1:${PORT}`;
 const phoneUrl = () => (/^https:\/\//.test(UI_URL) ? UI_URL : '');
