@@ -560,3 +560,58 @@ exit 0
     child.kill();
   }
 });
+
+test('the menu bar answers while Tailscale is waiting for the network', async () => {
+  const tsPort = port + 2;
+  const tsHome = join(dir, 'ts-slow-home');
+  const tsData = join(dir, 'ts-slow-builds');
+  mkdirSync(join(tsHome, 'bin'), { recursive: true });
+  mkdirSync(tsData, { recursive: true });
+  const ts = join(tsHome, 'bin/tailscale');
+  writeFileSync(ts, `#!/bin/bash
+echo "$*" >> "${dir}/ts-slow-calls"
+case "$1 $2" in
+  "status --json")
+    if [ -f "${dir}/ts-slow-up" ]; then echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"mac.example.ts.net."}}'
+    else echo '{"BackendState":"Stopped","Self":{}}'; fi;;
+  "serve --bg") touch "${dir}/ts-slow-serve"; echo "Serve started";;
+esac
+if [ "$1" = up ]; then sleep 8; touch "${dir}/ts-slow-up"; fi
+exit 0
+`, { mode: 0o755 });
+  const child = spawn(process.execPath, [join(ROOT, 'ui/server.mjs')], {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      HOME: tsHome,
+      PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+      MACBUILD_UI_PORT: String(tsPort),
+      MACBUILD_UI_URL: `http://127.0.0.1:${tsPort}`,
+      MACBUILD_BIN: join(dir, 'bin/macbuild'),
+      MACBUILD_DATA: tsData,
+      MACBUILD_PROJECTS: join(dir, 'projects.conf'),
+      MACBUILD_CONFIG: join(dir, 'ui.json'),
+      MACBUILD_TAILSCALE: ts,
+    },
+  });
+  const hit = (path) => new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: tsPort, path, headers: { host: `127.0.0.1:${tsPort}` } }, (res) => {
+      let text = '';
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => { let json = null; try { json = JSON.parse(text); } catch {} resolve({ status: res.statusCode, json }); });
+    });
+    req.on('error', reject);
+    req.setTimeout(2000, () => { req.destroy(); reject(new Error('timed out')); });
+    req.end();
+  });
+  try {
+    await until(async () => (await hit('/api/builds').catch(() => null))?.status === 200);
+    const started = Date.now();
+    const bar = await hit('/api/menubar');
+    assert.equal(bar.status, 200);
+    assert.ok(Date.now() - started < 2000, `menu bar waited ${Date.now() - started}ms for Tailscale`);
+    await until(async () => existsSync(join(dir, 'ts-slow-serve')), 15000);
+  } finally {
+    child.kill();
+  }
+});

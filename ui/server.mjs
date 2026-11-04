@@ -396,7 +396,6 @@ let openedTailscale = false;
 let ensuring = null;
 const SERVE_OK_MS = 15000;
 const SERVE_RETRY_MS = 5000;
-const SERVE_GIVE_UP_MS = 120000;
 const phoneUrl = () => tailnet.url;
 async function refreshTailnet() {
   const bin = tsBin();
@@ -415,15 +414,18 @@ async function ensureServe() {
   }
   let ok = false;
   try {
-    let running = false;
+    let state = '';
     try {
       const { stdout } = await run(bin, ['status', '--json'], { timeout: 5000 });
       const st = JSON.parse(stdout);
-      running = st.BackendState === 'Running' && Boolean(st.Self?.Online);
+      state = st.BackendState || '';
       const dns = st.Self?.DNSName?.replace(/\.$/, '');
       if (dns) tailnet = { ...tailnet, url: `https://${dns}:${HTTPS_PORT}` };
     } catch {}
-    if (!running) {
+    // Running/Starting with no internet is still a live node. `up` waits 20s for
+    // coordination servers and used to block the menu bar's 2s poll.
+    const live = state === 'Running' || state === 'Starting';
+    if (!live) {
       if (!openedTailscale && process.platform === 'darwin' && !process.env.MACBUILD_TAILSCALE) {
         openedTailscale = true;
         spawn('open', ['-a', 'Tailscale'], { stdio: 'ignore' });
@@ -446,11 +448,13 @@ async function keepTailscale() {
   return ensuring;
 }
 async function holdTailscale() {
-  const deadline = Date.now() + SERVE_GIVE_UP_MS;
   for (;;) {
-    await keepTailscale();
-    if (tailnet.ok || Date.now() >= deadline) return;
-    await new Promise((resolve) => { setTimeout(resolve, SERVE_RETRY_MS); });
+    try {
+      await keepTailscale();
+    } catch (error) {
+      console.error('tailscale', error.message.split('\n')[0]);
+    }
+    await new Promise((resolve) => { setTimeout(resolve, tailnet.ok ? SERVE_OK_MS : SERVE_RETRY_MS); });
   }
 }
 function plistLogin(file) {
@@ -481,7 +485,6 @@ async function doctorReport() {
 }
 const slimBuild = (build) => (build ? { id: build.id, project: build.project, profile: build.profile, status: build.status, subject: build.commit?.subject ?? '' } : null);
 async function setupView() {
-  await keepTailscale();
   const cfg = config();
   const doctor = await doctorReport();
   const barOn = await agentLoaded('local.macbuild.menubar');
@@ -1101,10 +1104,7 @@ async function api(req, res, url) {
   if (url.pathname === '/api/system' && req.method === 'GET') return json(res, 200, await system());
   if (url.pathname === '/api/setup' && req.method === 'GET') return json(res, 200, await setupView());
   if (url.pathname === '/api/setup' && req.method === 'POST') return applySetup(req, res);
-  if (url.pathname === '/api/menubar' && req.method === 'GET') {
-    await keepTailscale();
-    return json(res, 200, menubarView());
-  }
+  if (url.pathname === '/api/menubar' && req.method === 'GET') return json(res, 200, menubarView());
   if (url.pathname === '/api/projects/scan' && req.method === 'POST') {
     await run(BIN, ['scan'], { timeout: 60000 }).catch(() => {});
     const listed = allBuilds();
