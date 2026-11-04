@@ -752,8 +752,21 @@ setInterval(() => { try { adoptCli(); } catch (error) { console.error('cli', err
 
 let current = null;
 const orphans = new Set();
-const buildSucceeded = (text) => /^Build successful\s*$/m.test(text) || /^macbuild: unchanged since /m.test(text);
+const buildSucceeded = (text) => {
+  const plain = String(text).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  return /^Build successful\s*$/m.test(plain) || /^macbuild: unchanged since /m.test(plain);
+};
 const logFresh = (id, ms = 30000) => existsSync(logPath(id)) && Date.now() - statSync(logPath(id)).mtimeMs < ms;
+function pidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try { process.kill(n, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
+// xcodebuild can go quiet for minutes while still running. The CLI pid is the source of truth.
+function cliGone(build) {
+  if (pidAlive(build.pid)) return false;
+  return !logFresh(build.id, 45000);
+}
 function followOrphan(build) {
   if (orphans.has(build.id)) return;
   orphans.add(build.id);
@@ -811,14 +824,18 @@ function followCli(build) {
       if (!orphans.size) { prune(); next(); }
       return;
     }
-    if (!logFresh(build.id, 45000)) {
-      clearInterval(tracker);
-      orphans.delete(build.id);
-      save({ ...latest, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
-      if (!orphans.size) next();
+    if (!cliGone(latest)) {
+      setTimeout(tick, 2000);
       return;
     }
-    setTimeout(tick, 2000);
+    clearInterval(tracker);
+    orphans.delete(build.id);
+    if (buildSucceeded(logText(latest.id))) {
+      try { await finish({ ...latest, status: 'running' }, 0); } catch (error) { console.error('cli', build.id, error.message); }
+    } else {
+      save({ ...latest, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
+    }
+    if (!orphans.size) { prune(); next(); }
   };
   setTimeout(tick, 2000);
 }
@@ -830,8 +847,15 @@ function adoptCli() {
 async function recoverInterrupted() {
   for (const build of allBuilds()) {
     if (build.trigger === 'cli') {
-      if (isActive(build) && logFresh(build.id)) followCli(build);
-      else if (isActive(build)) save({ ...build, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
+      const falseStop = build.status === 'failed' && build.reason === 'The CLI build stopped';
+      if (falseStop && buildSucceeded(logText(build.id))) {
+        await finish({ ...read(build.id), status: 'running' }, 0);
+        continue;
+      }
+      if (!isActive(build)) continue;
+      if (!cliGone(build)) { followCli(build); continue; }
+      if (buildSucceeded(logText(build.id))) await finish({ ...read(build.id), status: 'running' }, 0);
+      else save({ ...build, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
       continue;
     }
     const restartFail = build.status === 'failed' && build.reason === 'The UI restarted during this build';

@@ -3,7 +3,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -147,6 +147,16 @@ head -c 2048 /dev/zero > "$out"
   }));
   writeFileSync(join(dir, 'builds', recovered, 'build.log'), '[RUN_FASTLANE] done\r\nBuild successful\r\n');
   writeFileSync(join(dir, 'builds', recovered, 'app.ipa'), Buffer.alloc(2048));
+  // A CLI job the dashboard marked stopped after xcodebuild went quiet, even though eas succeeded.
+  const cliFalse = '20260101020202-cli-app';
+  mkdirSync(join(dir, 'builds', cliFalse), { recursive: true });
+  writeFileSync(join(dir, 'builds', cliFalse, 'meta.json'), JSON.stringify({
+    id: cliFalse, project: 'my_app', platform: 'ios', action: 'build', profile: 'development', artifact: 'app.ipa',
+    trigger: 'cli', pid: 999999999, status: 'failed', reason: 'The CLI build stopped',
+    createdAt: Date.now() - 120000, startedAt: Date.now() - 120000, finishedAt: Date.now() - 1000,
+  }));
+  writeFileSync(join(dir, 'builds', cliFalse, 'build.log'), 'macbuild: fingerprint abc\n\x1b[32mBuild successful\x1b[39m\r\n');
+  writeFileSync(join(dir, 'builds', cliFalse, 'app.ipa'), Buffer.alloc(2048));
   server = spawn(process.execPath, ['--import', join(ROOT, 'test/fast-timers.mjs'), join(ROOT, 'ui/server.mjs')], {
     stdio: process.env.SERVER_LOG ? 'inherit' : 'ignore',
     env: {
@@ -169,6 +179,15 @@ test('a restart adopts a detached build that already succeeded', async () => {
   assert.equal(finished.reason, undefined);
 });
 
+test('a CLI job the dashboard marked stopped is recovered if the log succeeded', async () => {
+  const finished = await until(async () => {
+    const { json } = await request('/api/builds/20260101020202-cli-app');
+    return json?.status === 'success' && json;
+  });
+  assert.equal(finished.ipaBytes, 2048);
+  assert.equal(finished.reason, undefined);
+});
+
 test('a CLI job on disk shows up in the dashboard', async () => {
   const id = '20260104121212-cli-app';
   mkdirSync(join(dir, 'builds', id), { recursive: true });
@@ -182,6 +201,25 @@ test('a CLI job on disk shows up in the dashboard', async () => {
   const { json } = await request(`/api/builds/${id}`);
   assert.equal(json.trigger, 'cli');
   assert.equal(json.status, 'success');
+});
+
+test('a running CLI job is not failed while its process is still alive', async () => {
+  const id = '20260104131313-cli-live';
+  mkdirSync(join(dir, 'builds', id), { recursive: true });
+  writeFileSync(join(dir, 'builds', id, 'meta.json'), JSON.stringify({
+    id, project: 'my_app', platform: 'ios', action: 'build', profile: 'development', artifact: 'app.ipa',
+    trigger: 'cli', pid: process.pid, status: 'running', createdAt: Date.now() - 180000, startedAt: Date.now() - 180000,
+  }));
+  const log = join(dir, 'builds', id, 'build.log');
+  writeFileSync(log, '[RUN_FASTLANE] compiling\n');
+  const stale = (Date.now() / 1000) - 120;
+  utimesSync(log, stale, stale);
+  await pause(4500);
+  const { json } = await request(`/api/builds/${id}`);
+  assert.equal(json.status, 'running');
+  assert.equal(json.reason, undefined);
+  rmSync(join(dir, 'builds', id), { recursive: true, force: true });
+  await pause(2500);
 });
 
 test('a project named with an underscore builds', async () => {

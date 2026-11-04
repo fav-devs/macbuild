@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { finish, start } from '../lib/history.mjs';
+import { finish, readJob, start, writeJob } from '../lib/history.mjs';
 
 test('start writes a running CLI job the dashboard can read', () => {
   const data = mkdtempSync(join(tmpdir(), 'macbuild-history-'));
@@ -17,6 +17,20 @@ test('start writes a running CLI job the dashboard can read', () => {
   writeFileSync(log, 'Build successful\n');
   const done = finish(id, { status: 'success', artifact: ipa, data });
   assert.equal(done.status, 'success');
+  assert.equal(readFileSync(join(data, id, 'app.ipa'), 'utf8'), 'IPA\n');
+});
+
+test('finish can record success after a false CLI-stopped failure', () => {
+  const data = mkdtempSync(join(tmpdir(), 'macbuild-history-'));
+  const { id, log } = start({ project: 'myapp', profile: 'development', data });
+  writeFileSync(log, 'Build successful\n');
+  const stopped = readJob(id, data);
+  writeJob({ ...stopped, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() }, data);
+  const ipa = join(data, 'out.ipa');
+  writeFileSync(ipa, 'IPA\n');
+  const done = finish(id, { status: 'success', artifact: ipa, data });
+  assert.equal(done.status, 'success');
+  assert.equal(done.reason, undefined);
   assert.equal(readFileSync(join(data, id, 'app.ipa'), 'utf8'), 'IPA\n');
 });
 
