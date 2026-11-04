@@ -322,6 +322,10 @@ exit 0
   assert.equal(ok.items.find((item) => item.id === 'tailscale').status, 'ok');
 });
 
+test('the dashboard app.js parses', () => {
+  execFileSync(process.execPath, ['--check', join(ROOT, 'ui/public/app.js')]);
+});
+
 test('the menu bar LaunchAgent waits for Aqua', () => {
   const text = readFileSync(join(ROOT, 'install-ui.sh'), 'utf8');
   assert.match(text, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
