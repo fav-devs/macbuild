@@ -114,7 +114,7 @@ macbuild wait                                # block until the latest dashboard 
 macbuild wait myapp --json                   # same, as one JSON object
 macbuild mcp                                 # stdio MCP: wait, show, builds, log
 macbuild doctor                              # check the tools and logins builds need
-macbuild setup                               # dashboard, login, menu bar, and the same checks
+macbuild setup                               # the guided setup; --status for what's set up and missing
 ```
 
 Project names use letters, digits, `.`, `_` and `-`.
@@ -136,7 +136,7 @@ Optional, in `~/.config/macbuild/env`. The file stays on your Mac; never commit 
 
 ## Web UI
 
-Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on the Mac, with a menu bar extra for build status and a one-click build. Turn those off under Settings, or with `macbuild setup --nologin` and `--no-menubar`. With Tailscale the dashboard is also published on your tailnet only, at `https://<your-mac>.<tailnet>.ts.net:8443`. Open that in Safari on your iPhone and add it to your Home Screen. The setup guide at `#/setup` copies that URL.
+Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on the Mac, with a menu bar extra for build status and a one-click build. Turn those off under Settings, or with `macbuild setup --nologin` and `--no-menubar`. With Tailscale the dashboard is also published on your tailnet only, at `https://<your-mac>.<tailnet>.ts.net:8443`. Open that in Safari on your iPhone and add it to your Home Screen. Setup's Phone step gets Tailscale ready and shows that link with a QR code.
 
 - Start iOS, Simulator and Android builds from any branch, commit and `eas.json` profile, and reuse the last one when native code hasn't changed
 - When the working copy has local git changes a GitHub build would skip, split them into commits and push through T3 Code so unrelated files stay apart
@@ -295,7 +295,18 @@ Tools include `projects`, `commits`, `source`, `build`, `update`, `submit`, `bui
 
 ## OTA updates
 
-Open a project and choose **Push OTA** (or **OTA updates** in its sidebar). Select a destination profile/channel, Expo environment, pushed source branch, and iOS, Android, or both. Enter a release message and confirm the destination before publishing. Each OTA publish has its own history entry, live log, and success/failure status. OTA and store uploads share a queue independent of local builds.
+<img src="docs/ota.png" alt="The OTA page: channel cards, the commit that would ship, platforms, the message, a channels panel and the history">
+
+Open a project and choose **Push OTA** (or **OTA updates** in its sidebar). Publishing takes four steps:
+
+1. **Channel.** Each channel's card shows the update it has now. Production is marked, since that's where your users are.
+2. **Source.** A pushed branch, with the commit that would ship: its hash, subject, author and age.
+3. **Platforms and environment.** iOS, Android or both, and the Expo environment that supplies `EXPO_PUBLIC` variables.
+4. **Message.** Filled in from the commit; change it to say what users get.
+
+You review the update on the page before it goes out. A production update gets a warning-coloured confirmation that says who receives it and that it can't be taken back from phones that already have it.
+
+Beside the form, **Channels** shows for each channel the last update from this Mac, the newest build that receives it and its runtime, and Expo's update count. Below, the history lists every publish with its commit and status, filterable by channel. Each OTA publish has its own live log. OTA and store uploads share a queue independent of local builds.
 
 Agents and terminal users can publish the same way:
 
