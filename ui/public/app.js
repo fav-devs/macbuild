@@ -85,6 +85,7 @@ const STATUS = {
   success: ['Finished', 'check'], failed: ['Failed', 'cross'], cancelled: ['Cancelled', 'ban'], skipped: ['Reused', 'skip'],
 };
 const PHASES = {
+  UPDATE: 'Publish OTA update',
   SETUP: 'Setup', SETUP_WORKINGDIR: 'Prepare work folder', START_BUILD: 'Start build', PREPARE_PROJECT: 'Prepare project',
   READ_EAS_JSON: 'Read eas.json', READ_PACKAGE_JSON: 'Read package.json', INSTALL_DEPENDENCIES: 'Install dependencies',
   READ_APP_CONFIG: 'Read app config', RUN_EXPO_DOCTOR: 'Expo doctor', PREPARE_CREDENTIALS: 'Prepare credentials', PREBUILD: 'Prebuild',
@@ -98,26 +99,27 @@ const active = (build) => ['queued', 'running', 'cancelling'].includes(build.sta
 // Uploads were 'testflight' before Android, and are 'submit' now.
 const submits = (build) => build.action === 'submit' || build.action === 'testflight';
 const storeName = (platform) => (platform === 'android' ? 'Google Play' : 'TestFlight');
-const store = (build) => build.distribution === 'store' || submits(build);
+const store = (build) => build.action !== 'update' && (build.distribution === 'store' || submits(build));
 const short = (build) => build.commit?.short ?? '';
 const refOf = (build) => build.ref ?? '';
-const subject = (build) => build.commit?.subject || 'Working copy';
+const subject = (build) => build.action === 'update' ? build.updateMessage || 'OTA update' : build.commit?.subject || 'Working copy';
 const took = (build) => (build.startedAt && build.finishedAt ? span(build.finishedAt - build.startedAt) : '');
 const TRIGGERS = { manual: 'Started by hand', push: 'Push to branch', pr: 'Pull request', nightly: 'Nightly build', rebuild: 'Rebuild', cli: 'CLI' };
 const triggerOf = (build) => (build.by?.name ? `${esc(build.by.name)}${build.trigger === 'rebuild' ? ' <span class="faint">(rebuild)</span>' : ''}` : esc(TRIGGERS[build.trigger] ?? 'Started by hand'));
-const kindOf = (build) => (submits(build) ? storeName(build.platform) : build.profile);
-const platformName = (build) => (build.platform === 'android' ? 'Android' : build.simulator ? 'iOS Simulator' : 'iOS');
+const kindOf = (build) => (build.action === 'update' ? `OTA · ${build.channel}` : submits(build) ? storeName(build.platform) : build.profile);
+const platformName = (build) => (build.platform === 'all' ? 'iOS + Android' : build.platform === 'android' ? 'Android' : build.simulator ? 'iOS Simulator' : 'iOS');
 const FILE_KINDS = { 'app.ipa': 'IPA', 'app.apk': 'APK', 'app.aab': 'AAB', 'app.tar.gz': '.tar.gz' };
 const fileKind = (build) => FILE_KINDS[build.artifact ?? 'app.ipa'];
 // A build's own file is on this Mac: reused builds point at the earlier build instead.
-const hasFile = (build) => Boolean(build.ipaBytes && !build.expired && (build.status === 'success' || (build.status === 'skipped' && !build.reusedFrom)));
+const hasFile = (build) => Boolean(build.action !== 'update' && build.ipaBytes && !build.expired && (build.status === 'success' || (build.status === 'failed' && build.buildCompleted) || (build.status === 'skipped' && !build.reusedFrom)));
 const fixHtml = (text) => esc(text).replace(/`([^`]+)`/g, '<code>$1</code>');
 const RULE_KINDS = { push: 'On every push', pr: 'Pull requests', nightly: 'Every night' };
 const ruleTitle = (rule) => ((rule.on ?? 'push') === 'pr' ? 'Each pull request' : rule.on === 'nightly' ? `${esc(rule.branch)} every night at ${esc(rule.at)}` : `${esc(rule.branch)} on every push`);
 const ruleDetail = (rule) => `${rule.platform === 'android' ? 'Android' : 'iOS'} · ${esc(rule.profile)}${rule.submit ? ` · ${storeName(rule.platform)}` : ''}${rule.skipUnchanged ? ' · reuses' : ''}${rule.error ? ` · <span class="warn">${esc(rule.error)}</span>` : ''}`;
 const statusIcon = (status) => `<span class="st ${status}" role="img" aria-label="${STATUS[status][0]}">${icon(STATUS[status][1])}</span>`;
-const badge = (status) => `<span class="badge ${status}">${STATUS[status][0]}</span>`;
-const profileTag = (build) => (submits(build) ? `<span class="tag store">${icon('send')}${storeName(build.platform)}</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
+const badge = (status, label = STATUS[status][0]) => `<span class="badge ${status}">${esc(label)}</span>`;
+const buildBadge = (build) => badge(build.status, build.action === 'update' && build.status === 'running' ? 'Publishing OTA' : build.status === 'failed' && build.buildCompleted ? 'Build ready · post-build step failed' : undefined);
+const profileTag = (build) => (build.action === 'update' ? `<span class="tag">${icon('radio')}OTA · ${esc(build.channel)}</span>` : submits(build) ? `<span class="tag store">${icon('send')}${storeName(build.platform)}</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
 const platformTag = (build) => (build.platform === 'android' ? '<span class="tag">Android</span>' : build.simulator ? '<span class="tag">Simulator</span>' : '');
 
 // Project avatars: the app icon when the server found one in app.json, else a monogram on a gradient from the name.
@@ -203,7 +205,7 @@ async function expoOf(name) {
 // Shell: the sidebar, with the Mac itself at the bottom, on wide screens; tabs on a phone.
 const SECTIONS = {
   overview: ['Overview', 'home'], builds: ['Builds', 'layers'], branches: ['Branches', 'branch'], submissions: ['Submissions', 'send'],
-  channels: ['Channels', 'radio'], signing: ['Signing', 'shield'], environment: ['Environment', 'braces'], automation: ['Automation', 'bolt'],
+  updates: ['OTA updates', 'radio'], channels: ['Channels', 'radio'], signing: ['Signing', 'shield'], environment: ['Environment', 'braces'], automation: ['Automation', 'bolt'],
 };
 const ALIASES = { activity: 'builds', insights: 'overview', devices: 'signing' };
 function parseRoute() {
@@ -310,7 +312,7 @@ function buildRow(build, { project = true } = {}) {
   return `<a class="row build" href="#/build/${esc(build.id)}">
     ${statusIcon(build.status)}
     <span class="main"><span class="title">${esc(subject(build))}</span><span class="meta">${project ? `<span>${avatar(build.project, 'xs')}${esc(build.project)}</span><span class="sep"></span>` : ''}<span class="trunc">${esc(refOf(build))}</span><span class="sep"></span><span class="mono">${esc(short(build) || 'local')}</span>${build.source === 'working' ? '<span class="tag">local</span>' : ''}</span></span>
-    <span class="end">${platformTag(build)}${profileTag(build)}<span class="dur num">${esc(took(build))}</span><span class="when">${ago(build.createdAt)}</span></span>
+    <span class="end">${build.status === 'failed' && build.buildCompleted ? buildBadge(build) : ''}${platformTag(build)}${profileTag(build)}<span class="dur num">${esc(took(build))}</span><span class="when">${ago(build.createdAt)}</span></span>
   </a>`;
 }
 function dayGroups(builds, row = (build) => buildRow(build)) {
@@ -349,15 +351,15 @@ function tick() {
 setInterval(tick, 1000);
 // The running build and the queue behind it, re-rendered only when that work changes so the bar keeps animating.
 function liveCard(builds) {
-  const running = builds.find((build) => ['running', 'cancelling'].includes(build.status));
+  const running = builds.filter((build) => ['running', 'cancelling'].includes(build.status));
   const queued = builds.filter((build) => build.status === 'queued').reverse();
-  if (!running && !queued.length) return '';
+  if (!running.length && !queued.length) return '';
   const kind = (build) => `${build.platform === 'android' ? 'Android · ' : ''}${kindOf(build)}`;
   return `<section class="card live">
-    <div class="live-head"><span class="led busy"></span><b>${running ? 'Building now' : 'Up next'}</b></div>
-    ${running ? `<a class="live-main" href="#/build/${esc(running.id)}">
-      <span class="who">${avatar(running.project, 'lg')}<div><span class="title">${esc(subject(running))}</span><span class="meta">${esc(running.project)}<span class="sep"></span>${esc(refOf(running))}<span class="sep"></span><span class="mono">${esc(short(running))}</span><span class="sep"></span>${esc(kind(running))}</span></div></span>
-      <span class="live-progress">${progress(running)}</span></a>` : ''}
+    <div class="live-head"><span class="led busy"></span><b>${running.some((build) => build.action === 'update') ? running.length > 1 ? 'Building and publishing OTA' : 'Publishing OTA' : running.length > 1 ? 'Building and submitting' : running[0]?.submissionOnly ? 'Submitting now' : running.length ? 'Building now' : 'Up next'}</b></div>
+    ${running.map((build) => `<a class="live-main" data-live-job="${esc(build.id)}" href="#/build/${esc(build.id)}">
+      <span class="who">${avatar(build.project, 'lg')}<div><span class="title">${esc(subject(build))}</span><span class="meta">${esc(build.project)}<span class="sep"></span>${esc(refOf(build))}<span class="sep"></span><span class="mono">${esc(short(build))}</span><span class="sep"></span>${build.submissionOnly ? 'Upload · ' : ''}${esc(kind(build))}</span></div></span>
+      <span class="live-progress">${progress(build)}</span></a>`).join('')}
     ${queued.map((build) => `<a class="next" href="#/build/${esc(build.id)}">${icon('clock', 'sm')}<span class="title">${esc(subject(build))}</span><span class="sep"></span><span>${esc(build.project)} · ${esc(refOf(build))} · ${esc(kind(build))}</span></a>`).join('')}
   </section>`;
 }
@@ -365,9 +367,11 @@ function updateLive(box, builds) {
   if (!box) return;
   const key = builds.filter(active).map((build) => `${build.id}:${build.status}`).join(',');
   if (box.dataset.key === key) {
-    const running = builds.find((build) => build.status === 'running');
-    const label = box.querySelector('.phase-name');
-    if (running && label && running.phases?.length) label.textContent = phaseName(running.phases.at(-1).name);
+    for (const row of box.querySelectorAll('[data-live-job]')) {
+      const running = builds.find((build) => build.id === row.dataset.liveJob && build.status === 'running');
+      const label = row.querySelector('.phase-name');
+      if (running && label && running.phases?.length) label.textContent = phaseName(running.phases.at(-1).name);
+    }
     return;
   }
   box.dataset.key = key;
@@ -552,23 +556,26 @@ function buildHead(build) {
     primary,
     build.reusedFrom ? `<a class="btn primary" href="#/build/${esc(build.reusedFrom)}">${icon('right')}Open the reused build</a>` : '',
     file && !apk ? `<a class="btn" href="/api/builds/${esc(build.id)}/artifact">${icon('download')}${fileKind(build)}</a>` : '',
-    active(build) ? `<button class="btn danger" data-cancel="${esc(build.id)}" ${build.status === 'cancelling' ? 'disabled' : ''}>${icon('ban')}Cancel</button>` : `<button class="btn" data-rebuild="${esc(build.id)}">${icon('rebuild')}Rebuild</button>`,
+    file && (build.status === 'success' || (build.status === 'failed' && build.buildCompleted)) && build.distribution === 'store' && (!submits(build) || build.status === 'failed') && !build.devClient && !build.simulator && !build.installable && !build.submissionOnly && !build.submission && (build.artifact ?? 'app.ipa') === (build.platform === 'android' ? 'app.aab' : 'app.ipa') ? `<button class="btn primary" data-submit="${esc(build.id)}" data-store="${storeName(build.platform)}">${icon('send')}Submit to ${storeName(build.platform)}</button>` : '',
+    build.submissionOf ? `<a class="btn" href="#/build/${esc(build.submissionOf)}">Original build</a>` : '',
+    build.action === 'update' ? `<a class="btn" href="#/p/${esc(build.project)}/updates">${icon('radio')}OTA updates</a>` : '',
+    active(build) ? `<button class="btn danger" data-cancel="${esc(build.id)}" ${build.submissionOnly || build.action === 'update' ? 'data-upload="true"' : ''} ${build.status === 'cancelling' ? 'disabled' : ''}>${icon('ban')}${build.submissionOnly || build.action === 'update' ? 'Stop waiting' : 'Cancel'}</button>` : build.submissionOnly || build.action === 'update' ? '' : `<button class="btn" data-rebuild="${esc(build.id)}">${icon('rebuild')}Rebuild</button>`,
     build.status === 'failed' ? askOpen(build, 'btn') : '',
   ].join('');
   const person = build.by?.name ?? build.commit?.author;
   return `<header class="head"><div class="bhead">${avatar(build.project, 'lg')}<div><h1>${esc(subject(build))}</h1>
-    <div class="facts">${badge(build.status)}${platformTag(build)}${profileTag(build)}${took(build) ? `<span>${icon('timer', 'sm')}${esc(took(build))}</span>` : ''}<span>${icon('clock', 'sm')}${ago(build.createdAt)}</span>${person ? `<span>${icon('user', 'sm')}${esc(person)}</span>` : ''}</div></div></div>
+    <div class="facts">${buildBadge(build)}${platformTag(build)}${profileTag(build)}${took(build) ? `<span>${icon('timer', 'sm')}${esc(took(build))}</span>` : ''}<span>${icon('clock', 'sm')}${ago(build.createdAt)}</span>${person ? `<span>${icon('user', 'sm')}${esc(person)}</span>` : ''}</div></div></div>
     <div class="actions">${actions}</div></header>`;
 }
 function buildAlert(build) {
   if (['running', 'cancelling'].includes(build.status)) {
-    return `<section class="card live" style="margin-bottom:20px"><div class="live-head"><span class="led busy"></span><b>${build.status === 'cancelling' ? 'Cancelling' : 'Building'}</b></div>
+    return `<section class="card live" style="margin-bottom:20px"><div class="live-head"><span class="led busy"></span><b>${build.status === 'cancelling' ? 'Cancelling' : build.action === 'update' ? 'Publishing OTA' : build.submissionOnly ? 'Submitting existing build' : 'Building'}</b></div>
       <div class="live-main"><div class="live-progress">${progress(build)}</div></div></section>`;
   }
-  if (build.status === 'queued') return `<div class="callout info" style="margin-bottom:20px">${icon('clock')}<div><b>Waiting</b></div></div>`;
+  if (build.status === 'queued') return `<div class="callout info" style="margin-bottom:20px">${icon('clock')}<div><b>${build.action === 'update' ? 'Waiting to publish OTA' : build.submissionOnly ? 'Waiting for another submission' : 'Waiting'}</b>${build.submissionOnly || build.action === 'update' ? '<p>Submissions and OTA publishes share an upload queue, independent of local builds.</p>' : ''}</div></div>`;
   if (build.status === 'failed') {
     const phase = build.phases?.at(-1)?.name;
-    return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}</b>
+    return `<div class="callout" style="margin-bottom:20px">${icon('alert')}<div><b>${build.buildCompleted ? 'Build succeeded; post-build step did not complete' : `Failed${phase ? ` during ${esc(phaseName(phase).toLowerCase())}` : ''}`}</b>
       ${build.hint ? `<p class="fix"><strong>Likely cause: ${esc(build.hint.title)}.</strong> ${fixHtml(build.hint.fix)}</p>` : ''}
       ${build.reason ? `<code>${esc(build.reason)}</code>` : ''}
       <div class="inline">${askOpen(build, 'btn sm')}<button class="btn sm" data-show-failure>Show the log</button></div></div></div>`;
@@ -576,7 +583,8 @@ function buildAlert(build) {
   if (build.status === 'skipped') {
     return `<div class="callout info" style="margin-bottom:20px">${icon('skip')}<div><b>Reused an earlier build</b>${build.reusedFrom ? `<span class="muted"><a class="link" href="#/build/${esc(build.reusedFrom)}">Open it</a></span>` : ''}</div></div>`;
   }
-  if (build.submission) return `<div class="callout info" style="margin-bottom:20px">${icon('send')}<div><b>Uploaded to ${build.platform === 'android' ? 'Google Play' : 'App Store Connect'}</b> <a class="link" href="${esc(build.submission)}">View</a></div></div>`;
+  if (build.action === 'update' && build.status === 'success') return `<div class="callout info" style="margin-bottom:20px">${icon('radio')}<div><b>OTA published to ${esc(build.channel)}</b><p>Only installed apps on this channel with a compatible runtime can receive this update. No store build was created.</p>${build.updateUrl ? `<a class="link" href="${esc(build.updateUrl)}">View update on Expo</a>` : ''}</div></div>`;
+  if (build.submission || (build.submissionOnly && build.status === 'success')) return `<div class="callout info" style="margin-bottom:20px">${icon('send')}<div><b>Uploaded to ${build.platform === 'android' ? 'Google Play' : 'App Store Connect'}</b> ${build.submission ? `<a class="link" href="${esc(build.submission)}">View</a>` : ''}<p>The store may still be processing this build.</p></div></div>`;
   return '';
 }
 function sizeChange(build) {
@@ -592,7 +600,7 @@ function buildTop(build) {
   const days = build.signing?.expires ? Math.round((new Date(build.signing.expires) - Date.now()) / DAY) : null;
   // One even grid, the way EAS lays out a build's details: what was built, from where, and when.
   const details = `<section class="card details"><div class="card-head"><h2>${icon('layers')}Details</h2>${build.app ? `<span class="faint mono">${esc(build.app.id)}</span>` : ''}</div><div class="card-body">${kv([
-    ['Platform', platformName(build)], ['Profile', esc(build.profile)], ['Distribution', build.distribution === 'store' ? 'Store' : 'Internal'],
+    ['Platform', platformName(build)], ['Profile', esc(build.profile)], ['Distribution', build.action === 'update' ? 'OTA update' : build.distribution === 'store' ? 'Store' : 'Internal'],
     ['Version', build.app ? `${esc(build.app.version)} <span class="faint">(${esc(build.app.number)})</span>` : ''],
     ['Branch', `${esc(refOf(build))}${build.source === 'working' ? ' <span class="tag">local</span>' : ''}`],
     ['Commit', commit?.url ? `<a class="link mono" href="${esc(commit.url)}">${esc(commit.short)}</a>` : `<span class="mono">${esc(short(build) || '—')}</span>`],
@@ -601,7 +609,7 @@ function buildTop(build) {
     ['Started by', triggerOf(build)], ['Created', when(build.createdAt)],
     ['Waited', build.startedAt ? span(build.startedAt - build.createdAt) : ''], ['Took', active(build) && build.startedAt ? `<span class="num" data-since="${build.startedAt}"></span>` : esc(took(build))],
     ['Size', build.ipaBytes && !build.expired ? `${mb(build.ipaBytes)}${sizeChange(build)}` : build.expired ? '<span class="faint">Removed to save space</span>' : ''],
-    ['Channel', esc(build.channel)], ['Runtime', build.runtime && !build.runtime.startsWith('file:') ? `<span class="mono">${esc(build.runtime.slice(0, 12))}</span>` : ''],
+    ['Channel', esc(build.channel)], ['Environment', esc(build.environment)], ['OTA message', esc(build.updateMessage)], ['Runtime', build.runtime && !build.runtime.startsWith('file:') ? `<span class="mono">${esc(build.runtime.slice(0, 12))}</span>` : ''],
     ['Native fingerprint', build.fingerprint ? `<span class="mono" title="${esc(build.fingerprint)}">${esc(build.fingerprint.slice(0, 12))}</span>` : ''],
     ['Signing expires', days !== null ? `<span class="${days < 30 ? 'warn' : ''}">${day(build.signing.expires)} · ${days}d</span>` : ''],
     ['Uncommitted', build.dirty ? `<span class="warn">${plural(build.dirty, 'file')} included</span>` : ''],
@@ -691,7 +699,7 @@ async function projectsPage() {
       const mine = builds.filter((build) => build.project === project.name);
       const last = mine[0]; const release = mine.find((build) => build.app)?.app;
       return `<a class="card pcard" href="#/p/${esc(project.name)}">
-        <div class="pcard-top">${avatar(project.name, 'lg')}<div><b>${esc(project.name)}</b><small>${esc(project.repo || 'Local repository')}</small></div>${last ? badge(last.status) : ''}</div>
+        <div class="pcard-top">${avatar(project.name, 'lg')}<div><b>${esc(project.name)}</b><small>${esc(project.repo || 'Local repository')}</small></div>${last ? buildBadge(last) : ''}</div>
         <div>${strip(mine)}<div class="strip-label"><span>${mine.length ? `Last ${Math.min(16, mine.length)} builds` : 'No builds yet'}</span><span>${last ? `Built ${ago(last.createdAt)}` : ''}</span></div></div>
         ${kv([['Version', release ? `${esc(release.version)} <span class="faint">(${esc(release.number)})</span>` : '<span class="faint">—</span>'], ['Working copy', `${esc(project.branch || 'detached')}${project.dirty ? ` <span class="warn">· ${project.dirty} changed</span>` : ''}`]])}
       </a>`;
@@ -720,7 +728,7 @@ async function projectPage({ name, section }) {
     ? `<header class="head"><div class="phead">${avatar(name, 'xl')}<div><h1>${esc(name)}</h1><div class="facts">
         ${data.repo ? `<a href="https://github.com/${esc(data.repo)}">${icon('github', 'sm')}${esc(data.repo)}</a>` : `<span>${icon('branch', 'sm')}Local repository</span>`}
         ${release ? `<span class="mono">${esc(release.id)}</span><span>${icon('tag', 'sm')}${esc(release.version)} (${esc(release.number)})</span>` : ''}</div></div></div>
-        <div class="actions">${latestDev ? `<a class="btn" href="#/build/${esc(latestDev.id)}">${icon('phone')}Install latest</a>` : ''}<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a></div></header>`
+        <div class="actions">${latestDev ? `<a class="btn" href="#/build/${esc(latestDev.id)}">${icon('phone')}Install latest</a>` : ''}<a class="btn" href="#/p/${esc(name)}/updates">${icon('radio')}Push OTA</a><a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a></div></header>`
     : header(SECTIONS[section][0], '', `<a class="btn primary" href="#/p/${esc(name)}/new">${icon('plus')}New build</a>`);
   const ptabs = `<nav class="ptabs" aria-label="Project sections">${Object.entries(SECTIONS).map(([key, [label]]) => `<a${key === section ? ' class="on" aria-current="page"' : ''} href="#/p/${esc(name)}${key === 'overview' ? '' : `/${key}`}">${label}</a>`).join('')}</nav>`;
   app.innerHTML = `${crumbs}${head}${ptabs}<div id="pbody"></div>`;
@@ -736,11 +744,52 @@ const EXPO_STATUS = { FINISHED: 'success', ERRORED: 'failed', CANCELED: 'cancell
 const expoIcon = (value) => statusIcon(EXPO_STATUS[value] ?? 'running');
 const expiryOf = (signing) => (signing?.expires ? Math.round((new Date(signing.expires) - Date.now()) / DAY) : null);
 
+function updateForm(data) {
+  const profiles = data.profiles.filter((profile) => profile.channel && !profile.developmentClient);
+  if (!profiles.length) return '<p class="hint">Add a channel to a preview or production build profile in eas.json, and configure expo-updates before publishing OTA.</p>';
+  return `<form class="form" id="ota-form">
+    <p>Publish JavaScript and assets to an existing app. Native code, plugins, or dependency changes may need a new store build. Only compatible runtimes receive the update.</p>
+    <label class="field"><span>Destination profile</span><select class="select" name="profile" required><option value="">Choose a profile and channel</option>${profiles.map((profile) => `<option value="${esc(profile.name)}" data-channel="${esc(profile.channel)}" data-environment="${esc(profile.environment || (['production', 'preview', 'development'].includes(profile.channel) ? profile.channel : ''))}">${esc(profile.name)} → ${esc(profile.channel)}</option>`).join('')}</select></label>
+    <label class="field"><span>Channel</span><input class="input" name="channel" readonly required placeholder="Choose a destination profile"></label>
+    <label class="field"><span>Expo environment</span><select class="select" name="environment" required><option value="">Choose environment</option><option value="preview">preview</option><option value="production">production</option><option value="development">development</option></select></label>
+    <label class="field"><span>Pushed source branch</span><select class="select" name="ref" required><option value="">Choose a pushed branch</option>${data.branches.map((branch) => `<option value="${esc(branch.name)}">${esc(branch.name)} · ${esc(branch.short)}</option>`).join('')}</select></label>
+    <label class="field"><span>Platform</span><select class="select" name="platform"><option value="ios">iOS</option><option value="android">Android</option><option value="all">iOS + Android</option></select></label>
+    <label class="field"><span>Update message</span><input class="input" name="message" required maxlength="1000" placeholder="Fix keyboard suggestions"></label>
+    <p class="hint">Publishes a pushed commit, not uncommitted files. The selected build profile supplies app-variant settings; the Expo environment supplies deployment variables.</p>
+    <button class="btn primary" type="submit">${icon('radio')}Publish OTA update</button><p class="hint" id="ota-error" role="alert"></p>
+  </form>`;
+}
 const PROJECT_SECTIONS = {
+  async updates(data, box) {
+    const updates = data.builds.filter((build) => build.action === 'update');
+    box.innerHTML = `<div class="cols main-side"><section class="card"><div class="card-head"><h2>Push an OTA update</h2></div><div class="card-body">${updateForm(data)}</div></section><section class="card"><div class="card-head"><h2>OTA history</h2></div>${updates.length ? `<div class="rows">${updates.map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('radio', 'No OTA updates yet')}</section></div>`;
+    const form = $('#ota-form');
+    if (!form) return;
+    form.elements.profile.onchange = () => {
+      const option = form.elements.profile.selectedOptions[0];
+      form.elements.channel.value = option.dataset.channel || '';
+      form.elements.environment.value = option.dataset.environment || '';
+    };
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      const values = Object.fromEntries(new FormData(form));
+      if (!confirm(`Publish OTA for ${data.name}?\nChannel: ${values.channel}\nEnvironment: ${values.environment}\nPlatform: ${values.platform}\nPushed branch: ${values.ref}\nMessage: ${values.message}\n\nCompatible installed apps may receive this update.`)) return;
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      try {
+        const result = await post(`/api/projects/${encodeURIComponent(data.name)}/updates`, values);
+        if (result.error) $('#ota-error').textContent = result.error;
+        else location.hash = `#/build/${result.id}`;
+      } catch (error) { $('#ota-error').textContent = error.message; }
+      finally { button.disabled = false; }
+    };
+    if (updates.some(active)) every(3000, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(data.name)}`); if (!fresh.builds.filter((build) => build.action === 'update').some(active)) { route(); return 'stop'; } return undefined; });
+  },
   async overview(data, box) {
     const name = data.name;
     const week = data.builds.filter((build) => Date.now() - build.createdAt < 7 * DAY).length;
-    const dev = data.builds.find((build) => !store(build) && !active(build)); const prod = data.builds.find((build) => store(build) && !active(build));
+    const dev = data.builds.find((build) => build.action !== 'update' && !store(build) && !active(build)); const prod = data.builds.find((build) => store(build) && !active(build));
     const latestRow = (build, label) => (build ? `<a class="row" href="#/build/${esc(build.id)}"><span class="kind">${label}</span>${statusIcon(build.status)}<span class="main"><span class="title">${esc(subject(build))}</span><span class="meta"><span class="trunc">${esc(refOf(build))}</span><span class="sep"></span><span class="mono">${esc(short(build))}</span>${build.app ? `<span class="sep"></span><span>${esc(build.app.version)} (${esc(build.app.number)})</span>` : ''}</span></span><span class="end">${profileTag(build)}<span class="when">${ago(build.createdAt)}</span></span></a>`
       : `<div class="row"><span class="kind">${label}</span><span class="main faint">No ${label.toLowerCase()} builds yet</span></div>`);
     const expiry = (signing) => {
@@ -1387,6 +1436,7 @@ document.addEventListener('click', async (event) => {
   if (event.target.dataset?.tip !== undefined) { showTip(event.target); return; }
   const cancel = event.target.closest('[data-cancel]');
   const rebuild = event.target.closest('[data-rebuild]');
+  const submit = event.target.closest('[data-submit]');
   const ask = event.target.closest('[data-ask]');
   const remove = event.target.closest('.remove-rule');
   const simulator = event.target.closest('[data-simulator]');
@@ -1403,7 +1453,13 @@ document.addEventListener('click', async (event) => {
     if (result.error) { install.disabled = false; flash(result.error, true); }
     else { flash(result.installed?.error ?? (result.installed?.name ? `On ${result.installed.name}` : 'Installing…'), Boolean(result.installed?.error)); route(); }
   }
-  if (cancel && confirm('Cancel this build?')) { await post(`/api/builds/${cancel.dataset.cancel}/cancel`); route(); }
+  if (cancel && confirm(cancel.dataset.upload ? 'Stop waiting? An upload or OTA publish already sent to Expo may continue; this does not retract it.' : 'Cancel this build?')) { await post(`/api/builds/${cancel.dataset.cancel}/cancel`); route(); }
+  if (submit && confirm(`Upload this existing build to ${submit.dataset.store}? This will not rebuild the app.`)) {
+    submit.disabled = true;
+    const created = await post(`/api/builds/${submit.dataset.submit}/submit`);
+    if (created.id) location.hash = `#/build/${created.id}`;
+    else { submit.disabled = false; flash(created.error ?? 'Could not start submission', true); }
+  }
   if (rebuild && confirm('Build this again?')) {
     const created = await post(`/api/builds/${rebuild.dataset.rebuild}/rebuild`);
     if (created.id) location.hash = `#/build/${created.id}`;

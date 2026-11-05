@@ -1,6 +1,7 @@
 // macbuild UI: start, watch and install local Expo builds from a phone. Listens on loopback only; `tailscale serve`
 // gives it HTTPS on the tailnet, which is also what iOS requires to install an app from a web page.
 import { spawn, execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { copyFileSync, createReadStream, existsSync, statfsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { cpus, homedir, hostname, loadavg, tmpdir, totalmem, uptime } from 'node:os';
@@ -10,8 +11,11 @@ import { promisify } from 'node:util';
 import QRCode from 'qrcode';
 import webpush from 'web-push';
 import { diagnose } from '../lib/diagnose.mjs';
+import { failureLine, jobSucceeded, recoverArtifact } from '../lib/build-result.mjs';
 import { listDevices, pickDevice, preferredDeviceId, tryInstall } from '../lib/device.mjs';
 import { readProfiles } from '../lib/profile.mjs';
+import { updateOptions } from '../lib/update.mjs';
+import { remoteApi } from '../lib/remote-api.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
 import { listAskChoices, parseAskChoice, startAsk } from '../lib/ask.mjs';
 
@@ -34,7 +38,15 @@ mkdirSync(DATA, { recursive: true });
 const dirOf = (id) => join(DATA, id);
 const metaOf = (id) => join(dirOf(id), 'meta.json');
 const validId = (id) => /^[0-9a-z-]+$/.test(id) && existsSync(metaOf(id));
-const read = (id) => JSON.parse(readFileSync(metaOf(id), 'utf8'));
+const read = (id) => {
+  const build = JSON.parse(readFileSync(metaOf(id), 'utf8'));
+  if (build.status === 'failed' && !build.buildCompleted && existsSync(artifactOf(build)) && existsSync(logPath(id))) {
+    const text = logText(id);
+    recoverArtifact(build, text, artifactOf(build));
+    if (build.buildCompleted) build.hint = diagnose(text);
+  }
+  return build;
+};
 // The web UI writes meta.json, and so does `macbuild` for terminal / agent builds. Reload at HTTP list
 // boundaries so a CLI job shows up without waiting for this process to save().
 let buildsCache = null;
@@ -51,6 +63,10 @@ const platformOf = (build) => build.platform ?? 'ios';
 const artifactOf = (build) => join(dirOf(build.id), build.artifact ?? 'app.ipa');
 const DOWNLOAD_TYPES = { 'app.apk': 'application/vnd.android.package-archive', 'app.tar.gz': 'application/gzip' };
 const submits = (build) => build.action === 'submit' || build.action === 'testflight';
+const remoteJob = (build) => build.submissionOnly || build.action === 'update';
+const canSubmit = (build) => build.action !== 'update' && (build.status === 'success' || (build.status === 'failed' && build.buildCompleted)) && build.distribution === 'store' && !build.devClient && !build.simulator && !build.expired
+  && (!submits(build) || build.status === 'failed') && !build.submissionOnly && !build.submission && !build.installable && existsSync(artifactOf(build))
+  && (build.artifact ?? 'app.ipa') === (platformOf(build) === 'android' ? 'app.aab' : 'app.ipa');
 
 const PROJECTS = process.env.MACBUILD_PROJECTS ?? join(homedir(), '.config/macbuild/projects.conf');
 const projects = () => (existsSync(PROJECTS) ? readFileSync(PROJECTS, 'utf8') : '').split('\n')
@@ -86,7 +102,7 @@ function iconPath(project) {
 const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 function estimate(build) {
   const done = allBuilds().filter((item) => item.status === 'success' && item.startedAt && item.finishedAt && item.project === build.project
-    && submits(item) === submits(build) && platformOf(item) === platformOf(build));
+    && item.action === build.action && Boolean(item.submissionOnly) === Boolean(build.submissionOnly) && platformOf(item) === platformOf(build));
   const same = done.filter((item) => item.profile === build.profile);
   const pool = (same.length >= 2 ? same : done).slice(0, 10);
   return pool.length ? median(pool.map((item) => item.finishedAt - item.startedAt)) : null;
@@ -111,8 +127,7 @@ function trackPhases(id) {
   if (fresh.length) save({ ...build, phases: [...(build.phases ?? []), ...fresh.map((name) => ({ name, at: Date.now() }))] });
 }
 function failure(text) {
-  const lines = clean(text);
-  return lines.filter((line) => /❌|error:|Error:|failed|FAILURE|non-zero code/i.test(line) && !/build command failed/.test(line)).slice(-1)[0]?.trim() ?? '';
+  return failureLine(text);
 }
 
 // What's inside a finished build: the app's id and version, and for an IPA, its signing.
@@ -146,6 +161,7 @@ async function inspect(build) {
     build.app = appOf(await plist(`${scratch}/Info.plist`));
     const profile = (await shell(`unzip -p '${file}' 'Payload/*.app/embedded.mobileprovision' | security cms -D`)).stdout;
     build.installable = profile.includes('ProvisionedDevices');
+    if (!build.distribution && profile.includes('<plist')) build.distribution = build.installable || profile.includes('ProvisionsAllDevices') ? 'internal' : 'store';
     const value = (key) => profile.match(new RegExp(`<key>${key}</key>\\s*<(?:string|date)>([^<]*)<`))?.[1];
     build.signing = {
       profile: value('Name'), team: value('TeamName'), expires: value('ExpirationDate'),
@@ -173,7 +189,7 @@ const androidHome = () => process.env.ANDROID_HOME || join(homedir(), 'Library/A
 const androidTool = (name) => { const file = join(androidHome(), 'cmdline-tools/latest/bin', name); return existsSync(file) ? file : name; };
 function prune() {
   const builds = allBuilds();
-  builds.filter((build) => existsSync(artifactOf(build))).slice(KEEP_IPAS).forEach((build) => {
+  builds.filter((build) => !isActive(build) && existsSync(artifactOf(build))).slice(KEEP_IPAS).forEach((build) => {
     rmSync(artifactOf(build), { force: true });
     rmSync(join(dirOf(build.id), 'sim'), { recursive: true, force: true });
     save({ ...build, installable: false, expired: true });
@@ -224,7 +240,7 @@ async function commitInfo(repo, ref) {
 function easProfiles(dir) {
   try { return readProfiles(join(dir, 'eas.json')); } catch { return []; }
 }
-async function enqueue({ project, profile, platform = 'ios', ref, label, submit, skipUnchanged, install, trigger, by }) {
+async function enqueue({ project, profile, platform = 'ios', ref, label, submit, skipUnchanged, install, trigger, by, remote }) {
   const known = projects().find((candidate) => candidate.name === project);
   if (!known) return { error: 'unknown project' };
   if (!['ios', 'android'].includes(platform)) return { error: 'unknown platform' };
@@ -244,15 +260,52 @@ async function enqueue({ project, profile, platform = 'ios', ref, label, submit,
   const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
   const build = {
     // The id keeps to what validId accepts, whatever the project is called (my_app, My.App).
-    id: `${stamp}-${project.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`, project, platform, action: submit ? 'submit' : 'build', profile,
+    id: `${stamp}-${project.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}${remote ? `-${randomUUID()}` : ''}`, project, platform, action: submit ? 'submit' : 'build', profile,
     distribution: chosen.distribution, channel: chosen.channel, artifact: `app.${target.artifact}`, simulator: target.simulator,
     devClient: chosen.developmentClient, skipUnchanged: Boolean(skipUnchanged) && !submit,
-    source: ref ? 'github' : 'working', ref: branch, commit, pr: pr ?? null, repo: repoSlug, trigger, by: by ?? null, status: 'queued', createdAt: Date.now(),
+    source: ref ? 'github' : 'working', ref: branch, commit, pr: pr ?? null, repo: repoSlug, trigger, by: by ?? null, ...(remote ? { remote } : {}), status: 'queued', createdAt: Date.now(),
     dirty: ref ? 0 : (await git(repo, 'status', '--porcelain')).split('\n').filter(Boolean).length,
     ...(install === undefined ? {} : { install: Boolean(install) }),
   };
   if (existsSync(metaOf(build.id))) return { error: 'a build just started' };
   mkdirSync(dirOf(build.id), { recursive: true });
+  save(build);
+  next();
+  return build;
+}
+async function enqueueUpdate(project, options, by, remote) {
+  const known = projects().find((item) => item.name === project);
+  if (!known) return { error: 'unknown project' };
+  let chosen;
+  try { chosen = updateOptions(join(known.dir, 'eas.json'), options); }
+  catch (error) { return { error: error.message }; }
+  const repo = await repoOf(project);
+  try { await run('git', ['-C', repo, 'fetch', '-q', '--prune', 'origin'], { timeout: 30000 }); }
+  catch { return { error: 'Could not fetch the pushed OTA source from origin.' }; }
+  const resolved = await git(repo, 'rev-parse', '--verify', '-q', `origin/${chosen.ref}^{commit}`) || await git(repo, 'rev-parse', '--verify', '-q', `${chosen.ref}^{commit}`);
+  if (!resolved || !(await git(repo, 'for-each-ref', `--contains=${resolved}`, '--format=%(refname)', 'refs/remotes/origin'))) return { error: 'OTA source must be pushed to origin first.' };
+  const build = { id: `${Date.now()}-update-${randomUUID()}`, project, ...chosen, updateMessage: chosen.message, action: 'update',
+    source: 'github', commit: await commitInfo(repo, resolved), repo: await slug(repo), trigger: remote ? 'remote' : 'manual', by, ...(remote ? { remote } : {}),
+    status: 'queued', createdAt: Date.now() };
+  delete build.message;
+  mkdirSync(dirOf(build.id), { recursive: true });
+  save(build);
+  next();
+  return build;
+}
+function enqueueSubmission(old, by, remote) {
+  if (!canSubmit(old)) return { error: 'Only completed, retained store builds can be submitted. Development, internal, simulator, and APK builds need a new store build.' };
+  if (!projects().some((project) => project.name === old.project)) return { error: 'unknown project' };
+  const existing = reloadBuilds().find((build) => build.submissionOf === old.id && (isActive(build) || build.status === 'success' || build.submission));
+  if (existing) return { error: 'This build already has a submission', id: existing.id };
+  const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+  const build = { ...old, id: `${stamp}-submit-${randomUUID()}`, action: 'submit', submissionOnly: true, submissionOf: old.id,
+    status: 'queued', createdAt: Date.now(), trigger: remote ? 'remote' : 'manual', by, skipUnchanged: false, install: false };
+  delete build.remote;
+  if (remote) build.remote = remote;
+  for (const key of ['startedAt', 'finishedAt', 'submission', 'reason', 'hint', 'phases', 'pid', 'installed', 'fingerprint', 'buildCompleted']) delete build[key];
+  mkdirSync(dirOf(build.id), { recursive: true });
+  copyFileSync(artifactOf(old), artifactOf(build));
   save(build);
   next();
   return build;
@@ -279,7 +332,7 @@ async function projectDetail(project) {
     return { name, short, subject, author, date: Number(time) * 1000, pr: prs.find((pr) => pr.headRefName === name) ?? null };
   }).filter((branch) => branch.name && branch.name !== 'HEAD');
   const builds = allBuilds().filter((build) => build.project === project.name);
-  const done = builds.filter((build) => ['success', 'failed'].includes(build.status));
+  const done = builds.filter((build) => build.action !== 'update' && ['success', 'failed'].includes(build.status));
   const times = done.filter((build) => build.status === 'success' && build.startedAt).map((build) => build.finishedAt - build.startedAt).sort((a, b) => a - b);
   const current = await git(repo, 'branch', '--show-current');
   const copy = await inspectRepo(repo);
@@ -317,7 +370,7 @@ async function notify(build) {
   const subscriptions = config().subscriptions ?? [];
   if (!subscriptions.length) return;
   vapid();
-  const title = `${build.project}: ${{ success: 'build finished', failed: 'build failed', skipped: 'no new build needed' }[build.status] ?? 'build cancelled'}`;
+  const title = `${build.project}: ${build.action === 'update' ? `OTA ${build.status === 'success' ? 'published' : build.status}` : { success: 'build finished', failed: 'build failed', skipped: 'no new build needed' }[build.status] ?? 'build cancelled'}`;
   const payload = JSON.stringify({ title, body: `${build.ref ?? ''} ${build.commit?.short ?? ''} · ${build.commit?.subject ?? ''}`.trim(), url: `/#/build/${build.id}` });
   const dead = [];
   await Promise.all(subscriptions.map((subscription) => webpush.sendNotification(subscription, payload).catch((error) => {
@@ -328,7 +381,7 @@ async function notify(build) {
 }
 async function sendWebhook(build, hook = config().webhook) {
   if (!hook) return;
-  const what = `${build.project} ${build.platform === 'android' ? 'Android' : 'iOS'} ${build.profile}`;
+  const what = build.action === 'update' ? `${build.project} OTA → ${build.channel}` : `${build.project} ${build.platform === 'android' ? 'Android' : 'iOS'} ${build.profile}`;
   const text = `${what} ${OUTCOMES[build.status] ?? build.status}${minutesOf(build) && build.status === 'success' ? ` in ${minutesOf(build)}` : ''}: ${build.commit?.subject ?? 'working copy'}`
     + `${build.ref ? ` (${build.ref}${build.commit?.short ? ` ${build.commit.short}` : ''})` : ''}${build.hint ? `. ${build.hint.title}.` : ''}${buildUrl(build) ? ` ${buildUrl(build)}` : ''}`;
   // Discord takes `content`; Slack and most others take `text`.
@@ -340,7 +393,7 @@ async function postStatus(build, state, description) {
   // Only for pushed commits: a working-copy build can include changes the commit doesn't have.
   if (!config().githubStatus || !build.repo || !build.commit?.hash || build.source === 'working') return;
   const args = ['api', '-X', 'POST', `repos/${build.repo}/statuses/${build.commit.hash}`, '-f', `state=${state}`,
-    '-f', `context=macbuild/${platformOf(build)}/${build.profile}`, '-f', `description=${description.slice(0, 139)}`];
+    '-f', `context=macbuild/${build.action === 'update' ? `ota/${build.channel}` : `${platformOf(build)}/${build.profile}`}`, '-f', `description=${description.slice(0, 139)}`];
   if (/^https?:\/\//.test(buildUrl(build))) args.push('-f', `target_url=${buildUrl(build)}`);
   await run('gh', args, { timeout: 15000 }).catch((error) => console.error('status', build.id, error.message.split('\n')[0]));
 }
@@ -769,11 +822,9 @@ setInterval(() => watchRules().catch((error) => console.error('watch', error.mes
 setInterval(() => { try { adoptCli(); } catch (error) { console.error('cli', error.message); } }, 2000);
 
 let current = null;
+let submission = null;
 const orphans = new Set();
-const buildSucceeded = (text) => {
-  const plain = String(text).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  return /^Build successful\s*$/m.test(plain) || /^macbuild: unchanged since /m.test(plain);
-};
+const buildSucceeded = (text, build) => jobSucceeded(build, text);
 const logFresh = (id, ms = 30000) => existsSync(logPath(id)) && Date.now() - statSync(logPath(id)).mtimeMs < ms;
 function pidAlive(pid) {
   const n = Number(pid);
@@ -792,20 +843,20 @@ function followOrphan(build) {
   const tick = async () => {
     const latest = read(build.id);
     const text = logText(build.id);
-    if (buildSucceeded(text)) {
+    if (buildSucceeded(text, latest)) {
       clearInterval(tracker);
       orphans.delete(build.id);
       try { await finish(latest, 0); } catch (error) { console.error('finish', build.id, error.message); }
-      if (!orphans.size) { prune(); next(); }
+      prune(); next();
       return;
     }
-    if (!logFresh(build.id, 45000)) {
+    if (!pidAlive(latest.pid) && !logFresh(build.id, 45000)) {
       clearInterval(tracker);
       orphans.delete(build.id);
       if (['running', 'cancelling'].includes(latest.status)) {
         save({ ...latest, status: 'failed', reason: 'The UI restarted during this build', finishedAt: Date.now() });
       }
-      if (!orphans.size) next();
+      next();
       return;
     }
     setTimeout(tick, 2000);
@@ -821,7 +872,7 @@ async function enrichCli(build) {
     save(build);
     build = read(build.id);
   }
-  if (build.status === 'success') maybeInstall(build);
+  if (build.status === 'success' && build.action !== 'update') maybeInstall(build);
   notify(build).catch((error) => console.error('notify', error.message));
   sendWebhook(build).catch((error) => console.error('webhook', error.message));
   const state = { success: 'success', skipped: 'success', failed: 'failure' }[build.status] ?? 'error';
@@ -839,7 +890,7 @@ function followCli(build) {
       clearInterval(tracker);
       orphans.delete(build.id);
       try { await enrichCli(latest); } catch (error) { console.error('cli', build.id, error.message); }
-      if (!orphans.size) { prune(); next(); }
+      prune(); next();
       return;
     }
     if (!cliGone(latest)) {
@@ -848,12 +899,12 @@ function followCli(build) {
     }
     clearInterval(tracker);
     orphans.delete(build.id);
-    if (buildSucceeded(logText(latest.id))) {
+    if (buildSucceeded(logText(latest.id), latest)) {
       try { await finish({ ...latest, status: 'running' }, 0); } catch (error) { console.error('cli', build.id, error.message); }
     } else {
       save({ ...latest, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
     }
-    if (!orphans.size) { prune(); next(); }
+    prune(); next();
   };
   setTimeout(tick, 2000);
 }
@@ -864,26 +915,27 @@ function adoptCli() {
 }
 async function recoverInterrupted() {
   for (const build of allBuilds()) {
+    if (build.status === 'failed' && build.buildCompleted) save(build);
     if (build.trigger === 'cli') {
       const falseStop = build.status === 'failed' && build.reason === 'The CLI build stopped';
-      if (falseStop && buildSucceeded(logText(build.id))) {
+      if (falseStop && buildSucceeded(logText(build.id), build)) {
         await finish({ ...read(build.id), status: 'running' }, 0);
         continue;
       }
       if (!isActive(build)) continue;
       if (!cliGone(build)) { followCli(build); continue; }
-      if (buildSucceeded(logText(build.id))) await finish({ ...read(build.id), status: 'running' }, 0);
+      if (buildSucceeded(logText(build.id), build)) await finish({ ...read(build.id), status: 'running' }, 0);
       else save({ ...build, status: 'failed', reason: 'The CLI build stopped', finishedAt: Date.now() });
       continue;
     }
     const restartFail = build.status === 'failed' && build.reason === 'The UI restarted during this build';
     if (!['running', 'cancelling'].includes(build.status) && !restartFail) continue;
     const text = logText(build.id);
-    if (buildSucceeded(text)) {
+    if (buildSucceeded(text, build)) {
       await finish({ ...read(build.id), status: build.status === 'cancelling' ? 'cancelling' : 'running' }, 0);
       continue;
     }
-    if (['running', 'cancelling'].includes(build.status) && logFresh(build.id)) {
+    if (['running', 'cancelling'].includes(build.status) && (pidAlive(build.pid) || logFresh(build.id))) {
       followOrphan(build);
       continue;
     }
@@ -893,17 +945,30 @@ async function recoverInterrupted() {
   }
 }
 async function next() {
-  if (current || orphans.size) return;
-  if (allBuilds().some((build) => build.trigger === 'cli' && isActive(build))) return;
-  const build = allBuilds().findLast((candidate) => candidate.status === 'queued');
+  const jobs = allBuilds();
+  if (!submission && !jobs.some((build) => remoteJob(build) && ['running', 'cancelling'].includes(build.status))) {
+    const upload = jobs.findLast((build) => remoteJob(build) && build.status === 'queued');
+    if (upload) startJob(upload);
+  }
+  if (current || [...orphans].some((id) => !remoteJob(read(id)))) return;
+  if (jobs.some((build) => build.trigger === 'cli' && !remoteJob(build) && isActive(build))) return;
+  const build = jobs.findLast((candidate) => !remoteJob(candidate) && candidate.status === 'queued');
   if (!build) return;
-  const args = [build.project, '--platform', platformOf(build), '--profile', build.profile, '--fast', '--output', artifactOf(build)];
-  if (submits(build)) args.push('--submit');
+  startJob(build);
+}
+function startJob(build) {
+  const args = [build.project, '--platform', platformOf(build), '--profile', build.profile];
+  if (build.action === 'update') args.unshift('update');
+  if (build.action === 'update') args.push('--channel', build.channel, '--message', build.updateMessage, '--environment', build.environment);
+  else if (build.submissionOnly) args.push('--submit-only', artifactOf(build));
+  else args.push('--fast', '--output', artifactOf(build));
+  if (submits(build) && !build.submissionOnly) args.push('--submit');
   if (build.skipUnchanged) args.push('--skip-unchanged');
-  if (build.source !== 'working') args.push('--ref', build.commit.hash);
+  if (build.source !== 'working' && !build.submissionOnly) args.push('--ref', build.commit.hash);
   const child = spawn(BIN, args, { detached: true, stdio: 'ignore', env: { ...process.env, MACBUILD_LOG: logPath(build.id) } });
-  current = { id: build.id, child };
-  const started = { ...build, status: 'running', startedAt: Date.now() };
+  if (remoteJob(build)) submission = { id: build.id, child };
+  else current = { id: build.id, child };
+  const started = { ...build, status: 'running', startedAt: Date.now(), pid: child.pid };
   save(started);
   const tracker = setInterval(() => trackPhases(build.id), 2000);
   // Listen before anything is awaited: a build that ends at once would otherwise close unheard.
@@ -915,11 +980,12 @@ async function next() {
     } catch (error) {
       console.error('finish', build.id, error.message);
     }
-    current = null;
+    if (remoteJob(build)) submission = null;
+    else current = null;
     prune();
     next();
   });
-  machine().then(({ name }) => postStatus(started, 'pending', `Building on ${name}`));
+  machine().then(({ name }) => postStatus(started, 'pending', build.action === 'update' ? `Publishing OTA to ${build.channel}` : build.submissionOnly ? 'Submitting existing build' : `Building on ${name}`));
 }
 async function finish(build, code) {
   const text = logText(build.id);
@@ -930,6 +996,8 @@ async function finish(build, code) {
   if (build.status === 'failed') { build.reason = failure(text); build.hint = diagnose(text); }
   else { delete build.reason; delete build.hint; }
   build.submission = text.match(/https:\/\/expo\.dev\S+\/submissions\/[0-9a-f-]+/)?.[0];
+  if (build.action === 'update') build.updateUrl = text.match(/https:\/\/expo\.dev\/[^\s\x1b]+\/updates\/[^\s\x1b]+/)?.[0];
+  recoverArtifact(build, text, artifactOf(build));
   if (build.status === 'skipped') {
     // The earlier build this one stands for: one of the dashboard's own when its file is in a build folder, else a copy.
     const inside = relative(DATA, reused);
@@ -942,14 +1010,14 @@ async function finish(build, code) {
       await inspect(build);
     }
   }
-  if (build.status === 'success') {
+  if (build.status === 'success' || build.buildCompleted) {
     await inspect(build);
     const before = allBuilds().find((item) => item.id !== build.id && item.status === 'success' && item.ipaBytes && item.project === build.project
       && item.profile === build.profile && platformOf(item) === platformOf(build));
     if (before && build.ipaBytes) build.sizeBefore = before.ipaBytes;
   }
   save(build);
-  if (build.status === 'success') maybeInstall(build);
+  if (build.status === 'success' && !remoteJob(build)) maybeInstall(build);
   notify(build).catch((error) => console.error('notify', error.message));
   sendWebhook(build).catch((error) => console.error('webhook', error.message));
   const state = { success: 'success', skipped: 'success', failed: 'failure' }[build.status] ?? 'error';
@@ -960,9 +1028,9 @@ function cancel(id) {
   const build = read(id);
   if (build.status === 'queued') return save({ ...build, status: 'cancelled', finishedAt: Date.now() });
   const cli = build.trigger === 'cli' && isActive(build);
-  if (current?.id !== id && !orphans.has(id) && !cli) return;
+  if (current?.id !== id && submission?.id !== id && !orphans.has(id) && !cli) return;
   save({ ...build, status: 'cancelling' });
-  const pid = current?.id === id ? current.child?.pid : (cli ? build.pid : null);
+  const pid = current?.id === id ? current.child?.pid : submission?.id === id ? submission.child?.pid : ((cli || orphans.has(id)) ? build.pid : null);
   if (pid) {
     try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
     setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 5000);
@@ -1153,6 +1221,10 @@ async function api(req, res, url) {
     }
     if (req.method === 'GET') return json(res, 200, await currentCommit(project.dir, project.name));
   }
+  if (parts[1] === 'projects' && parts[2] && parts[3] === 'updates' && req.method === 'POST') {
+    const build = await enqueueUpdate(parts[2], await body(req), who(req));
+    return json(res, build.error ? 400 : 201, build);
+  }
   if (parts[1] === 'projects' && parts[2] && req.method === 'GET') {
     const project = projects().find((known) => known.name === parts[2]);
     if (!project) return json(res, 404, { error: 'unknown project' });
@@ -1178,9 +1250,14 @@ async function api(req, res, url) {
   }
   const id = parts[2];
   if (parts[1] === 'builds' && id && validId(id)) {
+    if (parts[3] === 'submit' && req.method === 'POST') {
+      const build = enqueueSubmission(read(id), who(req));
+      return json(res, build.error ? build.id ? 409 : 400 : 201, build);
+    }
     if (parts[3] === 'cancel' && req.method === 'POST') { cancel(id); return json(res, 200, read(id)); }
     if (parts[3] === 'rebuild' && req.method === 'POST') {
       const old = read(id);
+      if (old.submissionOnly || old.action === 'update') return json(res, 400, { error: 'Use the project OTA form or original build to retry without rebuilding.' });
       const build = await enqueue({ project: old.project, profile: old.profile, platform: platformOf(old), ref: old.source === 'working' ? null : old.commit.hash, label: old.ref, submit: submits(old), skipUnchanged: false, trigger: 'rebuild', by: who(req) });
       return json(res, build.error ? 400 : 201, build);
     }
@@ -1234,7 +1311,14 @@ async function api(req, res, url) {
       }
       return json(res, 200, { build: withEstimate(read(id)), lines, next: nextOffset });
     }
-    if (!parts[3] && req.method === 'GET') return json(res, 200, withEstimate(read(id)));
+    if (!parts[3] && req.method === 'GET') {
+      const build = read(id);
+      if (build.status === 'success' && !build.distribution && !build.expired && existsSync(artifactOf(build))) {
+        await inspect(build);
+        save(build);
+      }
+      return json(res, 200, withEstimate(build));
+    }
   }
   return json(res, 404, { error: 'not found' });
 }
@@ -1261,10 +1345,14 @@ function serve(res, pathname) {
   createReadStream(file).pipe(res);
 }
 
+const handleRemote = remoteApi({ projects, profiles: easProfiles, git, run, enqueue, enqueueUpdate, jobs: reloadBuilds, read, validId, logPath, cancel, download, submit: enqueueSubmission, json });
+
 createServer(async (req, res) => {
   if (!knownHost(req.headers.host)) { res.writeHead(403, { 'content-type': 'text/plain' }); return res.end('unknown host\n'); }
   const url = new URL(req.url, 'http://local');
   try {
+    if (url.pathname === '/api/remote/v1' || url.pathname.startsWith('/api/remote/v1/')) return await handleRemote(req, res, url);
+    if (req.headers.authorization) return json(res, 403, { error: 'Bearer tokens are only accepted by /api/remote/v1.' });
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     if (url.pathname.startsWith('/ota/')) return ota(req, res, url);
     serve(res, url.pathname);

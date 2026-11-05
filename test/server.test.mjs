@@ -8,6 +8,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { issueToken, revokeToken } from '../lib/remote-access.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = mkdtempSync(join(tmpdir(), 'macbuild-server-'));
@@ -43,6 +44,35 @@ const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 const builds = async () => (await request('/api/builds')).json.builds;
 const done = (id) => until(async () => { const { json } = await request(`/api/builds/${id}`); return !['queued', 'running', 'cancelling'].includes(json?.status) && json; }, 20000);
 const rules = () => JSON.parse(readFileSync(join(dir, 'ui.json'), 'utf8')).triggers;
+function storeArtifact(name) {
+  const id = `20260103010101-${name}`;
+  const folder = join(dir, 'builds', id);
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, 'meta.json'), JSON.stringify({ id, project: 'my_app', platform: 'ios', profile: 'production', distribution: 'store', artifact: 'app.ipa', status: 'success', createdAt: Date.now() - 10000, source: 'working' }));
+  writeFileSync(join(folder, 'app.ipa'), 'store artifact');
+  return id;
+}
+
+test('a saved successful IPA can be submitted after a wrapper failure without rebuilding', async () => {
+  const id = storeArtifact('wrapper-failure');
+  const folder = join(dir, 'builds', id);
+  const meta = JSON.parse(readFileSync(join(folder, 'meta.json'), 'utf8'));
+  writeFileSync(join(folder, 'meta.json'), JSON.stringify({ ...meta, status: 'failed', action: 'submit', reason: '> 174 | throw session.error ?? EncodeFailed()' }));
+  writeFileSync(join(folder, 'build.log'), "Build successful\n/bin/macbuild: line 697: syntax error near unexpected token `('\n");
+  const recovered = await request(`/api/builds/${id}/log`);
+  assert.equal(recovered.json.build.status, 'failed');
+  assert.equal(recovered.json.build.buildCompleted, true);
+  assert.match(recovered.json.build.reason, /syntax error near unexpected token/);
+  const upload = await request(`/api/builds/${id}/submit`, { method: 'POST' });
+  assert.equal(upload.status, 201);
+  assert.equal(upload.json.submissionOnly, true);
+  assert.equal((await done(upload.json.id)).status, 'success');
+  const unproven = storeArtifact('native-failure');
+  const unprovenMeta = join(dir, 'builds', unproven, 'meta.json');
+  writeFileSync(unprovenMeta, JSON.stringify({ ...meta, id: unproven, status: 'failed', action: 'submit' }));
+  writeFileSync(join(dir, 'builds', unproven, 'build.log'), 'Error: native build failed\n');
+  assert.equal((await request(`/api/builds/${unproven}/submit`, { method: 'POST' })).status, 400);
+});
 // A project whose origin looks like GitHub (acme/<name>) but is a local bare repository, through insteadOf.
 function project(name, { icon = '' } = {}) {
   const origin = join(dir, `${name}.git`);
@@ -51,7 +81,7 @@ function project(name, { icon = '' } = {}) {
   git(dir, 'init', '-q', '--bare', origin);
   mkdirSync(app);
   git(app, 'init', '-q', '-b', 'main');
-  writeFileSync(join(app, 'eas.json'), JSON.stringify({ build: { development: { distribution: 'internal' }, production: {} } }));
+  writeFileSync(join(app, 'eas.json'), JSON.stringify({ build: { development: { distribution: 'internal' }, production: { channel: 'production', environment: 'production' } } }));
   if (icon) {
     mkdirSync(join(app, 'assets'));
     writeFileSync(join(app, 'assets/icon.png'), 'not really a png');
@@ -120,17 +150,19 @@ exit 1
 `, { mode: 0o755 });
   writeFileSync(join(bin, 'macbuild'), `#!/bin/bash
 case "$1" in
+  update) echo "[UPDATE] $*" >> "$MACBUILD_LOG"; while [ -f "${dir}/hold-update" ]; do sleep 0.1; done; case " $* " in *" --message reject "*) echo 'Error: OTA rejected' >> "$MACBUILD_LOG"; exit 1;; esac; echo 'https://expo.dev/accounts/test/projects/app/updates/test-group' >> "$MACBUILD_LOG"; echo 'macbuild: update successful' >> "$MACBUILD_LOG"; exit 0;;
   doctor) echo '{"ok":true,"items":[{"id":"macos","label":"macOS","status":"ok","detail":"15.0"},{"id":"projects","label":"projects","status":"ok","detail":"6 listed"}]}'; exit 0;;
   scan) exit 0;;
 esac
 project=$1; out=""; prev=""; for a in "$@"; do [ "$prev" = --output ] && out=$a; prev=$a; done
+case " $* " in *" --submit-only "*) echo "[SUBMIT] Uploading existing artifact $*" >> "$MACBUILD_LOG"; while [ -f "${dir}/hold-submit" ]; do sleep 0.1; done; sleep 1; echo "Submitted your app" >> "$MACBUILD_LOG"; exit 0;; esac
 echo "[START_BUILD] fake build $*" >> "$MACBUILD_LOG"
 case "$project" in
   fail.app) echo "❌ error: Provisioning profile \\"x\\" doesn't include the currently selected device \\"Phone\\"." >> "$MACBUILD_LOG"; exit 1;;
   skip.app) echo "macbuild: fingerprint fp-1" >> "$MACBUILD_LOG"
     earlier=$(ls "$MACBUILD_DATA"/*-skip-app/app.ipa 2>/dev/null | head -n 1)
     [ -n "$earlier" ] && { echo "macbuild: unchanged since $earlier" >> "$MACBUILD_LOG"; exit 0; };;
-  slow.app) sleep 3;;
+  slow.app) while [ -f "${dir}/hold-build" ]; do sleep 0.1; done; sleep 3;;
 esac
 head -c 2048 /dev/zero > "$out"
 `, { mode: 0o755 });
@@ -169,6 +201,90 @@ head -c 2048 /dev/zero > "$out"
   await until(async () => (await request('/api/builds')).status === 200);
 });
 after(() => { server?.kill(); hookServer?.close(); });
+
+test('remote API is opt-in, scoped, and isolated from dashboard administration', async () => {
+  const path = '/api/remote/v1';
+  assert.equal((await request(`${path}/info`)).status, 401);
+  const file = join(home, '.config/macbuild/remote-server.json');
+  const issued = issueToken({ name: 'windows-read', projects: ['my_app'], scopes: ['read'] }, file);
+  const headers = { authorization: `Bearer ${issued.token}` };
+  const info = await request(`${path}/info`, { headers, csrf: false });
+  assert.equal(info.status, 200);
+  assert.equal(info.json.client, 'windows-read');
+  assert.equal(JSON.stringify(info.json).includes(issued.token), false);
+  const list = await request(`${path}/projects`, { headers });
+  assert.deepEqual(list.json.map((item) => item.name), ['my_app']);
+  assert.equal(list.json[0].profiles.some((profile) => profile.name === 'production'), false);
+  assert.equal((await request('/api/settings', { method: 'POST', headers, body: { autoInstall: 'always' } })).status, 403);
+  assert.equal((await request(`${path}/info`, { headers: { ...headers, origin: 'https://evil.test' } })).status, 403);
+  assert.equal((await request(`${path}/jobs`, { method: 'POST', headers: { ...headers, 'idempotency-key': 'read-denied' }, body: { project: 'my_app', action: 'build' } })).status, 403);
+  revokeToken(issued.id, file);
+  assert.equal((await request(`${path}/info`, { headers })).status, 401);
+});
+
+test('remote jobs pin pushed commits, reject source mismatches, and retry idempotently', async (context) => {
+  const originalProjects = readFileSync(join(dir, 'projects.conf'), 'utf8');
+  context.after(() => writeFileSync(join(dir, 'projects.conf'), originalProjects));
+  const app = project('remote-app');
+  writeFileSync(join(dir, 'projects.conf'), `remote-app|${app}\n`, { flag: 'a' });
+  const file = join(home, '.config/macbuild/remote-server.json');
+  const issued = issueToken({ name: 'windows-build', projects: ['remote-app'], scopes: ['read', 'build', 'cancel'] }, file);
+  const headers = { authorization: `Bearer ${issued.token}`, 'idempotency-key': 'remote-first-build' };
+  const input = { project: 'remote-app', action: 'build', profile: 'development', platform: 'ios', ref: 'main', commit: git(app, 'rev-parse', 'HEAD'), repository: 'github.com/acme/remote-app' };
+  const post = (body, key) => request('/api/remote/v1/jobs', { method: 'POST', headers: { ...headers, ...(key ? { 'idempotency-key': key } : {}) }, body, csrf: false });
+  assert.equal((await post({ ...input, repository: 'github.com/acme/other' })).status, 409);
+  assert.equal((await post({ ...input, commit: 'a'.repeat(40) })).status, 409);
+  assert.equal((await post({ ...input, profile: 'production' })).status, 403);
+  assert.equal((await post({ ...input, project: 'my_app' })).status, 403);
+  assert.equal((await post({ ...input, submit: true, confirmRelease: true })).status, 403);
+  const [first, retry] = await Promise.all([post(input), post(input)]);
+  assert.equal(first.status, 201);
+  assert.equal(retry.status, 200);
+  assert.equal(first.json.id, retry.json.id);
+  assert.equal(first.json.commit.hash, input.commit);
+  assert.equal(first.json.source, 'github');
+  assert.equal('remote' in first.json, false);
+  const stored = JSON.parse(readFileSync(join(dir, 'builds', first.json.id, 'meta.json'), 'utf8'));
+  assert.equal(stored.trigger, 'remote');
+  assert.equal(stored.remote.tokenId, issued.id);
+  assert.equal((await post({ ...input, platform: 'android' })).status, 409);
+  assert.equal((await done(first.json.id)).status, 'success');
+  const logs = await request(`/api/remote/v1/jobs/${first.json.id}/log`, { headers });
+  assert.match(logs.json.text, /fake build remote-app/);
+  const audit = readFileSync(`${file}.audit.jsonl`, 'utf8');
+  assert.match(audit, /remote-first-build/);
+  assert.equal(audit.includes(issued.token), false);
+  const guarded = issueToken({ name: 'ci-gate', projects: ['remote-app'], requiredChecks: ['tests'] }, file);
+  const gated = await request('/api/remote/v1/jobs', { method: 'POST', headers: { authorization: `Bearer ${guarded.token}`, 'idempotency-key': 'required-ci-build' }, body: input });
+  assert.equal(gated.status, 409);
+});
+
+test('remote CLI queues, monitors, downloads, submits, and publishes through the real API with a fake worker', async (context) => {
+  const originalProjects = readFileSync(join(dir, 'projects.conf'), 'utf8');
+  context.after(() => writeFileSync(join(dir, 'projects.conf'), originalProjects));
+  const app = project('client-app');
+  writeFileSync(join(dir, 'projects.conf'), `client-app|${app}\n`, { flag: 'a' });
+  const file = join(home, '.config/macbuild/remote-server.json');
+  const issued = issueToken({ name: 'client-cli', projects: ['client-app'], profiles: ['development', 'production'], scopes: ['read', 'build', 'submit', 'update', 'cancel'] }, file);
+  const cli = (...args) => JSON.parse(execFileSync(process.execPath, [join(ROOT, 'bin/macbuild.mjs'), ...args], { cwd: app, encoding: 'utf8', timeout: 30000, env: { ...process.env, MACBUILD_SERVER_URL: `http://127.0.0.1:${port}`, MACBUILD_TOKEN: issued.token } }));
+  assert.equal(cli('doctor').client, 'client-cli');
+  assert.equal(cli('commits', 'client-app', '--ref', 'main')[0].hash, git(app, 'rev-parse', 'HEAD'));
+  const job = cli('client-app', '--profile', 'production', '--ref', 'main', '--request-id', 'client-build-request');
+  assert.equal(job.source, 'github');
+  assert.equal(cli('client-app', '--profile', 'production', '--ref', 'main', '--request-id', 'client-build-request').id, job.id);
+  assert.equal((await done(job.id)).status, 'success');
+  assert.equal(cli('show', job.id).status, 'success');
+  const output = join(dir, 'download.ipa');
+  assert.equal(cli('download', job.id, '--output', output).id, job.id);
+  assert.equal(readFileSync(output).length, 2048);
+  const upload = cli('submit', job.id, '--confirm-release');
+  assert.equal((await done(upload.id)).status, 'success');
+  const update = cli('update', 'client-app', '--ref', 'main', '--channel', 'production', '--message', 'test only', '--confirm-release');
+  assert.equal(update.action, 'update');
+  assert.equal((await done(update.id)).status, 'success');
+  writeFileSync(join(app, 'uncommitted'), 'do not publish');
+  assert.throws(() => cli('client-app', '--ref', 'main'), /Uncommitted/);
+});
 
 test('a restart adopts a detached build that already succeeded', async () => {
   const finished = await until(async () => {
@@ -231,6 +347,166 @@ test('a project named with an underscore builds', async () => {
   assert.equal(finished.project, 'my_app');
   const { json } = await request(`/api/builds/${created.json.id}/log`);
   assert.match(json.lines.join('\n'), /fake build my_app --platform ios --profile development --fast --output \S+\/app\.ipa/);
+});
+
+test('existing store artifacts submit without rebuilding and reject duplicates', async () => {
+  const id = '20260103010101-store-source';
+  const folder = join(dir, 'builds', id);
+  mkdirSync(folder, { recursive: true });
+  const source = { id, project: 'my_app', platform: 'ios', profile: 'production', distribution: 'store', artifact: 'app.ipa', status: 'success', createdAt: Date.now() - 10000, source: 'github', commit: { hash: 'saved-commit' } };
+  writeFileSync(join(folder, 'meta.json'), JSON.stringify(source));
+  writeFileSync(join(folder, 'app.ipa'), 'original store artifact');
+  assert.equal((await request(`/api/builds/${id}/submit`, { method: 'POST', csrf: false })).status, 403);
+  const created = await request(`/api/builds/${id}/submit`, { method: 'POST' });
+  assert.equal(created.status, 201);
+  assert.equal(created.json.submissionOf, id);
+  assert.equal(created.json.submissionOnly, true);
+  assert.equal(created.json.commit.hash, 'saved-commit');
+  assert.equal(readFileSync(join(dir, 'builds', created.json.id, 'app.ipa'), 'utf8'), 'original store artifact');
+  assert.equal((await request(`/api/builds/${id}/submit`, { method: 'POST' })).status, 409);
+  assert.equal((await done(created.json.id)).status, 'success');
+  const log = readFileSync(join(dir, 'builds', created.json.id, 'build.log'), 'utf8');
+  assert.match(log, /--submit-only .*app\.ipa/);
+  assert.doesNotMatch(log, /--output|--ref|START_BUILD/);
+  assert.equal((await request(`/api/builds/${id}/submit`, { method: 'POST' })).status, 409);
+  const uploadMeta = join(dir, 'builds', created.json.id, 'meta.json');
+  writeFileSync(uploadMeta, JSON.stringify({ ...JSON.parse(readFileSync(uploadMeta, 'utf8')), status: 'failed', submission: 'https://expo.dev/accounts/test/projects/app/submissions/1234-abcd' }));
+  assert.equal((await request(`/api/builds/${id}/submit`, { method: 'POST' })).status, 409);
+});
+
+test('OTA publishes a pinned pushed commit independently of a running local build', async () => {
+  writeFileSync(join(dir, 'hold-build'), 'hold');
+  let native;
+  try {
+    const created = await request('/api/builds', { method: 'POST', body: { project: 'slow.app', profile: 'production' } });
+    native = created.json;
+    await until(async () => (await request(`/api/builds/${native.id}`)).json.status === 'running');
+    const options = { profile: 'production', channel: 'production', environment: 'production', message: 'Fix OTA', ref: 'main', platform: 'ios' };
+    const update = await request('/api/projects/my_app/updates', { method: 'POST', body: options });
+    assert.equal(update.status, 201, JSON.stringify(update.json));
+    assert.equal(update.json.action, 'update');
+    assert.equal(update.json.updateMessage, 'Fix OTA');
+    assert.match(update.json.commit.hash, /^[0-9a-f]{40}$/);
+    const published = await done(update.json.id);
+    assert.equal(published.status, 'success');
+    assert.match(published.updateUrl, /updates\/test-group/);
+    assert.equal((await request(`/api/builds/${native.id}`)).json.status, 'running');
+    const log = readFileSync(join(dir, 'builds', update.json.id, 'build.log'), 'utf8');
+    assert.match(log, /update my_app --platform ios --profile production --channel production --message Fix OTA/);
+    assert.match(log, new RegExp(`--ref ${update.json.commit.hash}`));
+    assert.doesNotMatch(log, /--output|--submit-only|START_BUILD/);
+    assert.equal((await request(`/api/builds/${update.json.id}/rebuild`, { method: 'POST' })).status, 400);
+    assert.equal((await request('/api/projects/my_app/updates', { method: 'POST', body: options, csrf: false })).status, 403);
+    for (const changed of [{ message: '' }, { channel: 'other' }, { ref: '' }, { profile: 'missing' }, { environment: 'other' }, { platform: 'web' }]) {
+      assert.equal((await request('/api/projects/my_app/updates', { method: 'POST', body: { ...options, ...changed } })).status, 400);
+    }
+    const failed = await request('/api/projects/my_app/updates', { method: 'POST', body: { ...options, message: 'reject' } });
+    assert.equal((await done(failed.json.id)).status, 'failed');
+  } finally {
+    rmSync(join(dir, 'hold-build'), { force: true });
+    if (native) await done(native.id);
+  }
+});
+
+test('OTA cancellation does not cancel the native build and upload queue stays serialized', async () => {
+  writeFileSync(join(dir, 'hold-build'), 'hold');
+  writeFileSync(join(dir, 'hold-update'), 'hold');
+  let native; let first; let second;
+  try {
+    native = (await request('/api/builds', { method: 'POST', body: { project: 'slow.app', profile: 'production' } })).json;
+    const options = { profile: 'production', channel: 'production', message: 'First OTA', ref: 'main', platform: 'ios' };
+    first = (await request('/api/projects/my_app/updates', { method: 'POST', body: options })).json;
+    await until(async () => (await request(`/api/builds/${first.id}`)).json.status === 'running');
+    second = (await request('/api/projects/my_app/updates', { method: 'POST', body: { ...options, message: 'Second OTA' } })).json;
+    assert.equal((await request(`/api/builds/${second.id}`)).json.status, 'queued');
+    await request(`/api/builds/${first.id}/cancel`, { method: 'POST' });
+    assert.equal((await done(first.id)).status, 'cancelled');
+    assert.equal((await request(`/api/builds/${native.id}`)).json.status, 'running');
+    rmSync(join(dir, 'hold-update'), { force: true });
+    assert.equal((await done(second.id)).status, 'success');
+  } finally {
+    rmSync(join(dir, 'hold-build'), { force: true });
+    rmSync(join(dir, 'hold-update'), { force: true });
+    if (native) await done(native.id);
+    if (first?.id) await done(first.id);
+    if (second?.id) await done(second.id);
+  }
+});
+
+test('submissions bypass a running build and cancellation leaves that build untouched', async () => {
+  const hold = join(dir, 'hold-build');
+  writeFileSync(hold, 'hold');
+  let build;
+  try {
+    const created = await request('/api/builds', { method: 'POST', body: { project: 'slow.app', profile: 'production' } });
+    assert.equal(created.status, 201);
+    build = created.json;
+    await until(async () => (await request(`/api/builds/${build.id}`)).json?.status === 'running');
+    const source = storeArtifact('concurrent-source');
+    writeFileSync(join(dir, 'hold-submit'), 'hold');
+    const upload = await request(`/api/builds/${source}/submit`, { method: 'POST' });
+    assert.equal(upload.status, 201);
+    await until(async () => readFileSync(join(dir, 'builds', upload.json.id, 'build.log'), 'utf8').includes('[SUBMIT]'));
+    assert.equal((await request(`/api/builds/${build.id}`)).json.status, 'running');
+    assert.equal((await request(`/api/builds/${upload.json.id}`)).json.status, 'running');
+    const second = await request(`/api/builds/${storeArtifact('second-upload')}/submit`, { method: 'POST' });
+    assert.equal(second.status, 201);
+    assert.equal((await request(`/api/builds/${second.json.id}`)).json.status, 'queued');
+    await request(`/api/builds/${upload.json.id}/cancel`, { method: 'POST' });
+    assert.equal((await done(upload.json.id)).status, 'cancelled');
+    assert.equal((await request(`/api/builds/${build.id}`)).json.status, 'running');
+    rmSync(join(dir, 'hold-submit'), { force: true });
+    assert.equal((await done(second.json.id)).status, 'success');
+    assert.equal((await request(`/api/builds/${build.id}`)).json.status, 'running');
+  } finally {
+    rmSync(hold, { force: true });
+    rmSync(join(dir, 'hold-submit'), { force: true });
+    if (build?.id) await done(build.id);
+  }
+});
+
+test('uploads bypass CLI builds and do not block the next local build', async () => {
+  const id = '20260103010301-live-cli';
+  const folder = join(dir, 'builds', id);
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, 'meta.json'), JSON.stringify({ id, project: 'my_app', profile: 'production', status: 'running', trigger: 'cli', pid: process.pid, createdAt: Date.now(), startedAt: Date.now() }));
+  writeFileSync(join(folder, 'build.log'), '[RUN_FASTLANE] compiling\n');
+  await pause(2200);
+  writeFileSync(join(dir, 'hold-submit'), 'hold');
+  let queued;
+  let upload;
+  try {
+    upload = await request(`/api/builds/${storeArtifact('cli-upload')}/submit`, { method: 'POST' });
+    assert.equal(upload.status, 201);
+    await until(async () => (await request(`/api/builds/${upload.json.id}`)).json?.status === 'running');
+    queued = await request('/api/builds', { method: 'POST', body: { project: 'droid.app', platform: 'android', profile: 'development' } });
+    assert.equal(queued.status, 201);
+    assert.equal((await request(`/api/builds/${queued.json.id}`)).json.status, 'queued');
+    const cli = JSON.parse(readFileSync(join(folder, 'meta.json'), 'utf8'));
+    writeFileSync(join(folder, 'meta.json'), JSON.stringify({ ...cli, status: 'cancelled', finishedAt: Date.now() }));
+    assert.equal((await done(queued.json.id)).status, 'success');
+    assert.equal((await request(`/api/builds/${upload.json.id}`)).json.status, 'running');
+  } finally {
+    rmSync(join(dir, 'hold-submit'), { force: true });
+    rmSync(folder, { recursive: true, force: true });
+    if (upload?.json?.id) await done(upload.json.id);
+  }
+});
+
+test('submission rejects development, simulator, missing, expired, and non-store artifacts', async () => {
+  for (const [index, fields] of [
+    { distribution: 'internal' }, { simulator: true }, { devClient: true }, { expired: true },
+    { status: 'failed' }, { platform: 'android', artifact: 'app.apk' }, { missing: true }, { action: 'submit' },
+  ].entries()) {
+    const id = `2026010301020${index}-invalid-source`;
+    const folder = join(dir, 'builds', id);
+    mkdirSync(folder, { recursive: true });
+    const source = { id, project: 'my_app', profile: 'production', distribution: 'store', artifact: 'app.ipa', status: 'success', createdAt: 1, ...fields };
+    writeFileSync(join(folder, 'meta.json'), JSON.stringify(source));
+    if (!fields.missing) writeFileSync(join(folder, source.artifact), 'invalid');
+    assert.equal((await request(`/api/builds/${id}/submit`, { method: 'POST' })).status, 400);
+    rmSync(folder, { recursive: true });
+  }
 });
 
 test('project list carries icons and latest builds', async () => {

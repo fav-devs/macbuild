@@ -33,10 +33,12 @@ The first build for a new app can stop on signing prompts macbuild doesn't know.
 | Local files that a GitHub `--ref` build would skip | `macbuild commit <name> --push` (T3 CLI splits related files; never `git add .`) |
 | To wait for a dashboard job | `macbuild wait` (or `macbuild wait <id\|project>`). Add `--json` for one object, `--follow` to stream the log. |
 | A failed build sent to T3 Code in the project folder | `macbuild ask` (or `macbuild ask <id\|project>`). Uses the dashboard default model from T3’s signed-in agents, or `--codex` / `--model`. |
+| An OTA JavaScript/assets update | `macbuild update <name> --profile production --channel production --environment production --platform ios --ref main --message "Describe the change"` |
 
 Rules:
 
 - For TestFlight or Google Play, use `--ref` with a pushed branch, so uncommitted or out-of-date local code doesn't ship.
+- OTA also requires a pushed `--ref`, channel and message. `macbuild ota` is an alias. Select the build profile whose channel and app-variant env match the installed app. OTA cannot ship native code and reaches only compatible runtimes. Publishing affects installed apps, so only run it when the user requests a release; do not publish merely to test this feature. Inspect OTA jobs with the same builds/show/log/wait commands as builds.
 - Android needs Android Studio's SDK and Java 17. `macbuild doctor` shows whether they're found.
 - Don't run `eas build` without `--local`. Cloud builds cost money, and using macbuild means the user chose local.
 - Dashboard jobs write `~/.local/share/macbuild/builds/<id>/build.log` and `meta.json`. A CLI `macbuild <name>` writes the same history, so it shows up in the web UI. It also keeps `~/Library/Logs/<name>-<platform>-build-<profile>.log` (a symlink to that job log). Read those when a build fails. A failed build also prints a `likely cause` and its fix when it recognises the error.
@@ -51,10 +53,20 @@ To make a project's agents build locally, add this to its `AGENTS.md`:
 ## Builds are local only
 
 Never run an EAS cloud build. Build on the Mac with `macbuild <project>`.
+Publish an authorized OTA release with `macbuild update <project> --channel production --profile production --environment production --platform ios --ref main --message "Release message"`. OTA only reaches compatible installed runtimes; native changes need a build.
 Wait for a dashboard job with `macbuild wait`. Inspect with `macbuild builds`, `macbuild log` and `macbuild show`. Do not poll show in a loop.
 ```
 
 ## Work on macbuild
+
+### Remote workers
+
+- Node 22+ clients on Windows/Linux/macOS use `bin/macbuild.mjs` (npm bin). Existing shell installations dispatch remote commands there. Native builds still require this Mac; never fall back to cloud builds or to local execution when a remote fails.
+- Connect with `macbuild remote add NAME URL --token-stdin`. Configure tokens only on the Mac with `macbuild server token create --name NAME --projects PROJECT --profiles development --scopes read,build,cancel`. Never put tokens in chat, source files, or command-line arguments. The server stores hashes; clients store private credentials.
+- Run remote builds from the client's project checkout. Inspect with `macbuild source`; commit explicitly selected paths with Git. `macbuild push --confirm-push` pushes the clean current branch, never forces or stages. Remote builds require matching origin, pushed pinned commits, allowed profiles/scopes, and any configured required CI checks. `--ref BRANCH --allow-dirty` explicitly excludes dirty changes; do not use it to silently bypass the user's intended source.
+- Remote OTA/submission requires a user-authorized release, token scope, and `--confirm-release` (MCP `confirmRelease: true`). Test only with fake workers, never publish to test functionality. Queue with `macbuild PROJECT`, monitor using `macbuild wait ID --json`, download with `macbuild download ID --output FILE`.
+- Remote MCP runs with `macbuild --remote NAME mcp` in the client's project checkout. Local administration uses `macbuild --local ...`. New modules: `lib/remote-access.mjs` (token policy), `lib/remote-api.mjs` (versioned restricted API), `lib/remote-client.mjs` (HTTPS/source gates), `lib/remote-mcp.mjs` (stdio tools). Keep the dashboard loopback-only. This is trusted-tailnet execution, not a multi-user code sandbox; remote scopes do not replace dashboard network ACLs.
+- Validate package contents with `npm pack --dry-run`. Do not publish npm packages without an explicit user request. Cross-platform client tests: `node --test test/remote.test.mjs`; full worker tests still use the UI dependencies and macOS/Linux.
 
 - `bin/macbuild`: the CLI. Must run on macOS's bash 3.2.
 - `lib/eas_pty.py`: runs `eas` in a terminal so prompts can be answered. New prompts go in `SPECS` in `bin/macbuild`.

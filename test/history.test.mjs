@@ -4,6 +4,39 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { finish, readJob, start, writeJob } from '../lib/history.mjs';
+import { jobSucceeded } from '../lib/build-result.mjs';
+
+test('retained successful build remains failed when its wrapper prevents submission', () => {
+  const data = mkdtempSync(join(tmpdir(), 'macbuild-wrapper-'));
+  const { id, log } = start({ project: 'less', action: 'submit', data });
+  const artifact = join(data, 'output.ipa');
+  writeFileSync(artifact, 'IPA');
+  const text = "> 174 | throw session.error ?? EncodeFailed()\nBuild successful\n/bin/macbuild: line 697: syntax error near unexpected token `('\n";
+  writeFileSync(log, text);
+  const build = finish(id, { status: 'failed', artifact, data });
+  assert.equal(build.status, 'failed');
+  assert.equal(build.buildCompleted, true);
+  assert.equal(build.ipaBytes, 3);
+  assert.match(build.reason, /syntax error near unexpected token/);
+  assert.equal(jobSucceeded(build, text), false);
+  assert.equal(jobSucceeded(build, `${text}macbuild: submission successful\n`), true);
+  assert.equal(jobSucceeded({ action: 'build' }, text), true);
+});
+
+test('start preserves store eligibility from the original CLI build profile', () => {
+  const root = mkdtempSync(join(tmpdir(), 'macbuild-history-store-'));
+  writeFileSync(join(root, 'eas.json'), JSON.stringify({ build: { production: {}, development: { developmentClient: true, distribution: 'internal' } } }));
+  const { build } = start({ project: 'myapp', profile: 'production', dir: root, data: join(root, 'builds') });
+  assert.equal(build.distribution, 'store');
+  assert.equal(build.devClient, false);
+});
+
+test('CLI submission-only jobs are distinguishable from builds with auto-upload', () => {
+  const data = mkdtempSync(join(tmpdir(), 'macbuild-history-upload-'));
+  const { build } = start({ project: 'upload', action: 'submit', submissionOnly: 'true', data });
+  assert.equal(build.submissionOnly, true);
+  assert.equal(build.action, 'submit');
+});
 
 test('start writes a running CLI job the dashboard can read', () => {
   const data = mkdtempSync(join(tmpdir(), 'macbuild-history-'));

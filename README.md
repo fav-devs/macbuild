@@ -14,6 +14,8 @@ macbuild wraps `eas build --local`: it answers the signing prompts, builds any b
 
 ## Install
 
+For Windows/Linux clients connecting to a Mac, see [Remote builds](#remote-builds-windows-linux-and-other-macs). The native build worker still runs on macOS.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh | bash
 ```
@@ -69,9 +71,12 @@ macbuild myapp --profile preview --fast       # any eas.json profile, reusing co
 | `--screenshot PATH` | With `--install` on the Simulator, save a screenshot of the app once it's open. |
 | `--skip-unchanged` | Reuse the last build of this profile when the native code hasn't changed. macbuild compares fingerprints from the project's own `@expo/fingerprint`. Meant for development and simulator builds, which load JavaScript from Metro. |
 | `--submit` | Upload to TestFlight or Google Play after the build, with the `eas.json` submit profile named like the build profile, or `production`. `--testflight` still works. |
+| `--submit-only PATH` | Upload an existing store IPA or AAB without rebuilding. Uses configured submission credentials noninteractively. |
 | `--send` | Send the build to the device set in `MACBUILD_TAILDROP_TARGET` with Taildrop. |
 | `--fast` | Keep one work folder per app and profile and turn on Xcode's compilation cache, so later builds reuse compiled output. |
 | `--output PATH` | Where the build goes. Default: your Desktop. |
+
+Completed store builds have a **Submit to TestFlight** or **Submit to Google Play** action on their dashboard build page. Confirming uploads the retained artifact without rebuilding, with a separate job for logs and status. Uploads run alongside local builds without taking the build lock; submissions use their own single-job queue. Development, internal, simulator, expired, and APK builds are not eligible. Configure submission credentials once in a terminal if the upload reports missing credentials. Stopping the local submission job does not retract an upload already scheduled with Expo.
 
 When a build fails, macbuild prints the likely cause and how to fix it if it recognises the error: a device missing from the provisioning profile, a CocoaPods conflict, an expired certificate, the wrong Java for Gradle, and more. Send that log to T3 Code in the project folder with `macbuild ask`. The dashboard Settings page lists T3’s signed-in agents; `--codex` or `--model` override the default.
 
@@ -172,7 +177,121 @@ curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh |
 
 This removes the command, the `eas` wrapper, the web UI service and `~/.cache/macbuild`. It keeps your settings and build history; delete `~/.macbuild`, `~/.config/macbuild` and `~/.local/share/macbuild` to clear everything.
 
+## Remote builds: Windows, Linux, and other Macs
+
+The same Mac can now act as a build worker. A dependency-light Node CLI sends authenticated jobs to the existing dashboard server; Windows and Linux do not need Xcode, Bash, Apple credentials, or EAS installed. The Mac keeps its signing credentials and runs **local** EAS builds. Remote jobs, source commits, requester names, logs, and artifacts appear in the existing UI.
+
+This repository includes an npm package, `@fav-devs/macbuild` (Node 22+). **It is not published by this change.** Build a local installable package with `npm pack`, transfer the `.tgz` privately to the client, then install it:
+
+```sh
+npm install -g ./fav-devs-macbuild-0.2.0.tgz
+```
+
+After the maintainer publishes the package, the equivalent is `npm install -g @fav-devs/macbuild`. No install scripts execute automatically. Existing shell installations on the Mac continue to work.
+
+### Connect a client
+
+1. On the Mac, complete the normal `macbuild setup --ui`, Expo login, signing setup, and project registration. Verify a local build works first. The dashboard must be reachable from the client over HTTPS, normally through Tailscale.
+2. On the Mac, create a separately revocable token for each client. Start with development builds only:
+
+   ```sh
+   macbuild server token create --name windows-agent \
+     --projects parley,less --profiles development --scopes read,build,cancel
+   ```
+
+   This prints a token **once**. Treat it as a password, transfer it privately, and never put it in chat, Git, or an agent prompt. The Mac stores only its hash. Tokens expire after 90 days by default (`--expires-days 1` through `365`). Administer them locally with `macbuild server token list` and `macbuild server token revoke ID`; revocation does not stop jobs already launched.
+3. On Windows, put only the token value in a temporary private file, then run PowerShell:
+
+   ```powershell
+   Get-Content -Raw .\macbuild-token.txt | macbuild remote add home-mac https://your-mac.ts.net:8443 --token-stdin
+   Remove-Item .\macbuild-token.txt
+   macbuild doctor
+   macbuild list
+   ```
+
+   Restrict the client config (`~/.config/macbuild/remotes.json`) to your Windows account using NTFS ACLs. On Unix it is written with mode `0600`. If PowerShell blocks npm's script shim, invoke `macbuild.cmd` instead. Use `macbuild remote list`, `remote use NAME`, or `remote remove NAME` to manage connections. `--remote NAME` overrides the default and `--local` explicitly selects the Mac worker. A failed remote connection **never** falls back to running locally.
+
+For CI, inject `MACBUILD_SERVER_URL` and secret `MACBUILD_TOKEN` instead of storing a client config. Connections require valid HTTPS certificates; there is no insecure-TLS option. Plain HTTP is accepted only for loopback testing.
+
+### Source and release gates
+
+Run from the app's local Git checkout on the client:
+
+```sh
+macbuild source
+macbuild commits parley --ref main
+git add src/the-file-you-changed.ts
+git commit -m "Fix keyboard layout"
+macbuild push --confirm-push
+macbuild parley --profile development --wait --json
+```
+
+- **No automatic staging, committing, or pushing.** `push --confirm-push` pushes the clean current branch without force; rejected or divergent pushes remain rejected. Use Git for commit selection and history review.
+- By default, dirty files, unpushed HEAD commits, and a local HEAD that differs from origin block a job. `--ref main --allow-dirty` intentionally builds only that pushed source, excluding local changes. Detached HEAD needs an explicit `--ref`.
+- Client and server origins must identify the same HTTPS/SSH repository. The server fetches origin, verifies the exact commit is reachable from an origin branch, and rejects a moved branch. It always queues the pinned SHA, never the Mac's dirty working copy. No source ZIPs, arbitrary shell commands, or remote project-path registration are accepted.
+- Tokens have explicit project, profile, and action allowlists. Scopes are `read`, `build`, `update`, `submit`, and `cancel`. Use `read` alongside mutation scopes for monitoring. No wildcard project/profile permissions.
+- To require GitHub CI, add `--required-checks "tests,typecheck"` when issuing a token. The Mac's authenticated `gh` must be able to read check runs/statuses. Each named check must succeed for the exact SHA. Missing, pending, failed, or unreadable checks block queueing. This checks reported results, not branch-protection or workflow-author trust; configure those in GitHub as well.
+- OTA/store releases additionally require `--confirm-release` and the relevant token scope. For example, issue a separate release token with `--profiles production --scopes read,build,update,submit`. macbuild never requests an Apple password from the remote client; first-time credentials and unexpected signing prompts must be resolved on the Mac.
+
+```sh
+macbuild update parley --profile production --channel production \
+  --environment production --platform ios --ref main \
+  --message "Fix keyboard suggestions" --confirm-release
+macbuild submit BUILD_ID --confirm-release
+macbuild builds parley
+macbuild show BUILD_ID
+macbuild log BUILD_ID --tail 100
+macbuild wait BUILD_ID --follow --timeout 1800
+macbuild download BUILD_ID --output ./app.ipa
+macbuild cancel BUILD_ID
+```
+
+Remote job commands return JSON and queue without waiting unless `--wait` is passed. `wait` returns exit `0` for success/skipped, `1` for failed/cancelled, or `124` for timeout. Disconnecting or reaching a wait timeout does not cancel the Mac job. Downloading never overwrites an existing file. Store submission can reuse a retained artifact built from pushed source; no rebuild is needed. Remote OTA and submissions retain the existing separate upload queue.
+
+Creation requests have persisted per-token idempotency keys. To safely retry after losing a response, reuse the reported `--request-id` with identical arguments; a different payload is rejected. A successful retry returns the existing job. Keep job history for the retry period; deleting history removes this record. Mutation attempts by authenticated clients are logged to `~/.config/macbuild/remote-server.json.audit.jsonl`, without raw tokens. Review and rotate this log as needed.
+
+**Network trust:** this is a personal, trusted-tailnet worker, not a public multi-tenant build service. Remote token scopes apply to `/api/remote/v1`; the existing dashboard remains trusted-tailnet access. Anyone allowed to reach the dashboard directly has its existing UI capabilities, independent of token scopes. Use Tailscale ACLs and do not share dashboard access with untrusted users. Authorized repository code executes on the Mac with the worker's account permissions; tokens are not an execution sandbox.
+
+### Remote MCP for agents
+
+Configure the agent on the client with a stdio MCP server after connecting its remote. Set the MCP working directory to the app's checkout:
+
+```json
+{
+  "mcpServers": {
+    "macbuild": {
+      "command": "macbuild",
+      "args": ["--remote", "home-mac", "mcp"]
+    }
+  }
+}
+```
+
+Tools include `projects`, `commits`, `source`, `build`, `update`, `submit`, `builds`, `show`, `log`, `wait`, and `cancel`. Build tools use the client's working directory and the same source gates as the CLI. Release tools require `confirmRelease: true` **and** token permission; agents must obtain the user's release request rather than infer approval. A long `wait` does not block other MCP requests. The existing local `macbuild mcp` remains available with `--local` on the Mac.
+
+## OTA updates
+
+Open a project and choose **Push OTA** (or **OTA updates** in its sidebar). Select a destination profile/channel, Expo environment, pushed source branch, and iOS, Android, or both. Enter a release message and confirm the destination before publishing. Each OTA publish has its own history entry, live log, and success/failure status. OTA and store uploads share a queue independent of local builds.
+
+Agents and terminal users can publish the same way:
+
+```sh
+macbuild update parley --profile production --channel production \
+  --environment production --platform ios --ref main \
+  --message "Fix keyboard suggestions"
+macbuild show parley
+macbuild log parley
+```
+
+`macbuild ota` is an alias for `macbuild update`. A message, channel, and pushed `--ref` are required. The profile defaults to `production`; platform defaults to `all`. The Expo environment can be inherited from the profile or a standard channel name, but custom channels require an explicit environment. The chosen profile must declare the destination channel; its inherited `env` values supply app-variant settings. Expo environment variables are loaded with `eas update --environment`; ignored local `.env` files are not copied into OTA checkouts.
+
+Publishing uses a separate checkout of a commit reachable from an origin branch, so uncommitted files do not ship and the original project is not modified. No native build or store submission runs. Projects need `expo-updates` configured and an installed release with a matching channel and compatible runtime. JavaScript and asset changes can ship OTA; native module, configuration, or runtime changes may require a new local build. A successful publish does not mean every installed app has already downloaded it. Stopping a publish does not roll back an update already accepted by Expo.
+
+The CLI blocks until publication finishes and records the result in the same history used by `macbuild builds`, `show`, `log`, and the MCP read tools. For dashboard publishes, agents can use `macbuild wait <id>` rather than polling.
+
 ## Develop
+
+Running CLI jobs parse their full script before starting, so editing `bin/macbuild` during a build cannot change that job's remaining commands. If the native build succeeds but a later step fails, the dashboard keeps the failure visible while allowing the saved store artifact to be downloaded or submitted without rebuilding. A submission already scheduled with Expo is not offered again.
 
 ```sh
 git clone https://github.com/fav-devs/macbuild.git && cd macbuild

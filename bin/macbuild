@@ -11,13 +11,24 @@
 #   --fast             fixed work directory + Xcode compilation caching, so later builds reuse compiled output
 #   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
 #   --output PATH      where the build goes (default: your Desktop)
+#   macbuild update <project> --profile production --channel production --message "Fix" --ref main [--environment production] [--platform ios|android|all]
 # Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show | wait | mcp | commit <name> [--push] | ask [id|project] [--codex]
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 # Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
+main() {
 START=$SECONDS
 HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../lib" ] || HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
+if [ "${MACBUILD_LOCAL:-}" != 1 ]; then
+  case "${1:-}" in remote|server|source|push) exec node "$ROOT/bin/macbuild.mjs" "$@";; esac
+  for arg in "$@"; do
+    case "$arg" in --remote|--local) exec node "$ROOT/bin/macbuild.mjs" "$@";; esac
+  done
+  if [ -n "${MACBUILD_SERVER_URL:-}" ] || [ -f "${MACBUILD_REMOTES:-$HOME/.config/macbuild/remotes.json}" ]; then
+    exec node "$ROOT/bin/macbuild.mjs" "$@"
+  fi
+fi
 # LaunchAgents for the dashboard and menu bar (UI_PLIST, BAR_PLIST, set_login).
 . "$ROOT/lib/agents.sh"
 . "$ROOT/lib/tailscale.sh"
@@ -302,13 +313,19 @@ case "${1:-}" in
   commit) shift; commit_cmd "$@"; exit $?;;
   ask) shift; exec node "$ROOT/lib/ask.mjs" "$@";;
 esac
-NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""
+NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""; SUBMIT_ONLY=""
+UPDATE=0; CHANNEL=""; MESSAGE=""; ENVIRONMENT=""
+if [ "${1:-}" = update ] || [ "${1:-}" = ota ]; then UPDATE=1; PLATFORM=all; shift; fi
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) PROFILE="${2:?--profile needs a name}"; shift;;
+    --channel) CHANNEL="${2:?--channel needs a name}"; shift;;
+    --message) MESSAGE="${2:?--message needs text}"; shift;;
+    --environment) ENVIRONMENT="${2:?--environment needs a name}"; shift;;
     --platform) PLATFORM="${2:?--platform needs ios or android}"; shift;;
     --android) PLATFORM=android;;
     --output) OUT="${2:?--output needs a path}"; shift;;
+    --submit-only) SUBMIT_ONLY="${2:?--submit-only needs an artifact path}"; SUBMIT=1; shift;;
     --ref) REF="${2:?--ref needs a branch or commit}"; shift;;
     --screenshot) SCREENSHOT="${2:?--screenshot needs a path}"; shift;;
     --fast) FAST=1;; --send) SEND=1;; --install) INSTALL=1;; --submit) SUBMIT=1;; --testflight) TESTFLIGHT=1; SUBMIT=1;;
@@ -320,19 +337,36 @@ while [ $# -gt 0 ]; do
   esac; shift
 done
 [ -n "$NAME" ] || { echo "usage: macbuild <project> [--platform ios|android] [--install|--submit|--fast|--send|--profile NAME]"; exit 2; }
-case "$PLATFORM" in ios|android) ;; *) echo "--platform is ios or android"; exit 2;; esac
+case "$PLATFORM:$UPDATE" in ios:*|android:*|all:1) ;; *) echo "--platform is ios or android (or all for OTA)"; exit 2;; esac
+if [ "$UPDATE" = 1 ]; then
+  [ "$INSTALL$SEND$SKIP_UNCHANGED$SUBMIT$FAST" = 00000 ] && [ -z "$OUT$SCREENSHOT$SUBMIT_ONLY" ] || { echo "OTA cannot build, install, or submit to a store"; exit 2; }
+  PROFILE="${PROFILE:-production}"
+else
+  [ -z "$CHANNEL$MESSAGE$ENVIRONMENT" ] || { echo "--channel, --message, and --environment need macbuild update"; exit 2; }
+fi
 [ "$TESTFLIGHT" = 0 ] || [ "$PLATFORM" = ios ] || { echo "--testflight is for iOS; use --submit to upload to Google Play"; exit 2; }
 [ "$SUBMIT" = 0 ] || [ "$SKIP_UNCHANGED" = 0 ] || { echo "--skip-unchanged can't go with --submit: the store needs a new build"; exit 2; }
 [ -z "$SCREENSHOT" ] || [ "$INSTALL" = 1 ] || { echo "--screenshot needs --install"; exit 2; }
+if [ -n "$SUBMIT_ONLY" ]; then
+  [ -f "$SUBMIT_ONLY" ] || { echo "submission artifact not found"; exit 2; }
+  [ "$INSTALL$SEND$SKIP_UNCHANGED" = 000 ] && [ -z "$REF$OUT$SCREENSHOT" ] || { echo "--submit-only cannot build, install, or change source"; exit 2; }
+  case "$PLATFORM:$SUBMIT_ONLY" in ios:*.ipa|android:*.aab) ;; *) echo "submission needs an IPA for iOS or an AAB for Android"; exit 2;; esac
+  SUBMIT_ONLY="$(cd "$(dirname "$SUBMIT_ONLY")" && pwd)/$(basename "$SUBMIT_ONLY")"
+fi
 if [ "$SUBMIT" = 1 ]; then PROFILE="${PROFILE:-production}"; fi
 PROFILE="${PROFILE:-development}"
 APP_DIR=$(N="$NAME" awk -F'|' '$1==ENVIRON["N"]{print $2}' "$PROJECTS" 2>/dev/null); APP_DIR="${APP_DIR:-$HOME/Documents/$NAME}"
 [ -f "$APP_DIR/eas.json" ] || { echo "no eas.json in $APP_DIR"; exit 1; }
+if [ "$UPDATE" = 1 ]; then
+  UPDATE_CONFIG=$(node "$ROOT/lib/update.mjs" "$APP_DIR/eas.json" "$PROFILE" "$CHANNEL" "$ENVIRONMENT" "$MESSAGE" "$REF" "$PLATFORM") || exit 2
+  while IFS='=' read -r key value; do case "$key" in channel) CHANNEL=$value;; environment) ENVIRONMENT=$value;; esac; done <<< "$UPDATE_CONFIG"
+fi
 DEVICE="${MACBUILD_DEVICE:-}"; TAILDROP="${MACBUILD_TAILDROP_TARGET:-}"
 [ "$SEND" = 0 ] || [ -n "$TAILDROP" ] || { echo "--send needs MACBUILD_TAILDROP_TARGET in $CONFIG/env"; exit 2; }
 CACHE="$HOME/.cache/macbuild"; mkdir -p "$CACHE"
 LOG="${MACBUILD_LOG:-$HOME/Library/Logs/$NAME-$PLATFORM-build-$PROFILE.log}"
 LOCK="$CACHE/build.lock"; BUILT=""; WORK=""; WORKTREE=""; WORKTREE_REPO=""; EAS_PID=""; WATCHER=""; FIFO=""; SNAP=""; SIM_DIR=""
+if [ "$UPDATE" = 1 ]; then LOCK="$CACHE/update-$(slug "$NAME-$CHANNEL").lock"; fi
 JOB_ID=""; JOB_STATUS=failed; JOB_RECORDED=""
 stop_eas() {
   # eas_pty.py passes the signal on to eas, then exits once eas has.
@@ -348,7 +382,7 @@ history_start() {
   JOB_ID=""
   while IFS='=' read -r key value; do
     case "$key" in id) JOB_ID=$value;; log) LOG=$value;; esac
-  done < <(node "$ROOT/lib/history.mjs" start --project "$NAME" --profile "$PROFILE" --platform "$PLATFORM" --dir "$APP_DIR" ${REF:+--ref "$REF"} --action "$([ "$SUBMIT" = 1 ] && echo submit || echo build)" --pid "$$")
+  done < <(MACBUILD_UPDATE_CHANNEL="$CHANNEL" MACBUILD_UPDATE_MESSAGE="$MESSAGE" MACBUILD_UPDATE_ENVIRONMENT="$ENVIRONMENT" node "$ROOT/lib/history.mjs" start --project "$NAME" --profile "$PROFILE" --platform "$PLATFORM" --dir "$APP_DIR" ${REF:+--ref "$REF"} --action "$([ "$UPDATE" = 1 ] && echo update || { [ "$SUBMIT" = 1 ] && echo submit || echo build; })" --submissionOnly "$([ -n "$SUBMIT_ONLY" ] && echo true || echo false)" --pid "$$")
   [ -n "$JOB_ID" ] && [ -n "$LOG" ]
 }
 history_finish() {
@@ -399,14 +433,14 @@ else
     ln -sfn "$LOG" "$HOME/Library/Logs/$NAME-$PLATFORM-build-$PROFILE.log"
   fi
 fi
-take_lock
+[ -n "$SUBMIT_ONLY" ] || take_lock
 if [ -z "$OWN_LOG" ] && [ -z "$JOB_ID" ]; then
   : > "$LOG"
 fi
 # Metro's temp cache embeds the absolute work directory, which changes per build: the next build then fails to resolve modules.
-rm -rf "${TMPDIR:-/tmp}/metro-cache" "${TMPDIR:-/tmp}"/metro-file-map-* "${TMPDIR:-/tmp}"/haste-map-* 2>/dev/null
+[ -n "$SUBMIT_ONLY" ] || [ "$UPDATE" = 1 ] || rm -rf "${TMPDIR:-/tmp}/metro-cache" "${TMPDIR:-/tmp}"/metro-file-map-* "${TMPDIR:-/tmp}"/haste-map-* 2>/dev/null
 # A temporary EAS keychain left by a dead build stays in the search list, locked, and codesign can pick it (errSecInternalComponent).
-if [ "$PLATFORM" = ios ] && ! pgrep -f eas_pty.py >/dev/null; then
+if [ "$UPDATE" = 0 ] && [ -z "$SUBMIT_ONLY" ] && [ "$PLATFORM" = ios ] && ! pgrep -f eas_pty.py >/dev/null; then
   for k in $(security list-keychains -d user 2>/dev/null | tr -d '"' | grep '/eas-build-.*\.keychain'); do security delete-keychain "$k" 2>/dev/null; done
   rm -f "${TMPDIR:-/tmp}"/eas-build-*.keychain
 fi
@@ -417,10 +451,15 @@ for d in "$HOME"/.nvm/versions/node/*/bin /opt/homebrew/bin /opt/homebrew/sbin /
 export PATH="$HOME/.local/bin:$PATH"; unset DEVELOPER_DIR
 # The web UI ignores this process's stdout, so every later echo has to land in the build log.
 [ -n "$OWN_LOG" ] && exec >> "$LOG" 2>&1
-[ "$PLATFORM" = android ] && android_env
+if [ "$UPDATE" = 0 ] && [ "$PLATFORM" = android ] && [ -z "$SUBMIT_ONLY" ]; then android_env; fi
 # macbuild owns the EAS work directory: --fast keeps one per app and profile (cleared when the next one starts) and
 # every other build gets a fresh one, removed when it ends.
-if [ "$FAST" = 1 ]; then
+if [ "$UPDATE" = 1 ]; then
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/macbuild-update.XXXXXX") || exit 1
+  export TMPDIR="$WORK"
+elif [ -n "$SUBMIT_ONLY" ]; then
+  :
+elif [ "$FAST" = 1 ]; then
   export EAS_LOCAL_BUILD_WORKINGDIR="$CACHE/work-$NAME-$PLATFORM-$PROFILE"; rm -rf "$EAS_LOCAL_BUILD_WORKINGDIR"; mkdir -p "$EAS_LOCAL_BUILD_WORKINGDIR"
   export XCODE_XCCONFIG_FILE="$ROOT/lib/fast.xcconfig"
 else
@@ -470,6 +509,36 @@ run_eas() {
   kill "$WATCHER" 2>/dev/null; wait "$WATCHER" 2>/dev/null
   rm -f "$FIFO" "$SNAP"; EAS_PID=""; WATCHER=""; FIFO=""; SNAP=""; return $status
 }
+profile_env() {
+  export EAS_BUILD_PROFILE="$PROFILE"
+  eval "$(node "$ROOT/lib/profile.mjs" --export-env "$APP_DIR/eas.json" "$PROFILE" 2>/dev/null | python3 -c '
+import json, sys, shlex
+raw = sys.stdin.read().strip()
+env = json.loads(raw) if raw else {}
+if not isinstance(env, dict):
+    raise SystemExit(0)
+for key, value in env.items():
+    if not isinstance(key, str) or not key.isidentifier():
+        continue
+    print("export %s=%s" % (key, shlex.quote("" if value is None else str(value))))
+')"
+}
+if [ -n "$SUBMIT_ONLY" ]; then
+  ARTIFACT="$SUBMIT_ONLY"
+  if [ -n "$JOB_ID" ]; then
+    node "$ROOT/lib/history.mjs" patch "$JOB_ID" --artifact "app.${ARTIFACT##*.}" >/dev/null 2>&1 || true
+  fi
+  cd "$APP_DIR" || exit 1
+  profile_env
+  SUBMIT_PROFILE=$(node -e 'const profiles = JSON.parse(require("fs").readFileSync("eas.json", "utf8")).submit || {}; console.log(profiles[process.argv[1]] ? process.argv[1] : "production")' "$PROFILE") || exit 1
+  echo "[SUBMIT] Uploading existing artifact (no rebuild)"
+  run_eas submit --platform "$PLATFORM" --profile "$SUBMIT_PROFILE" --path "$ARTIFACT" --non-interactive --wait
+  STATUS=$?
+  [ "$STATUS" = 0 ] || { echo "upload failed (exit $STATUS); configure submission credentials with eas submit in a terminal"; exit "$STATUS"; }
+  echo "macbuild: submission successful" >> "$LOG"
+  JOB_STATUS=success
+  exit 0
+fi
 # Which lockfile eas should install from. package.json "packageManager" wins, then a pnpm workspace,
 # then the same order eas-cli uses (npm, yarn, pnpm, bun). Extra lockfiles are dropped in the worktree
 # so eas doesn't silently switch to npm because a leftover package-lock.json is sitting there.
@@ -507,11 +576,16 @@ checkout() {
   sub=$(git -C "$APP_DIR" rev-parse --show-prefix); sub=${sub%/}
   git -C "$repo" fetch -q --prune origin || { echo "git fetch failed"; return 1; }
   sha=$(git -C "$repo" rev-parse --verify -q "origin/$REF^{commit}" || git -C "$repo" rev-parse --verify -q "$REF^{commit}") || { echo "unknown ref $REF"; return 1; }
+  if [ "$UPDATE" = 1 ]; then
+    [ -n "$(git -C "$repo" for-each-ref --contains="$sha" --format='%(refname)' refs/remotes/origin)" ] || { echo "OTA source must be pushed to origin first"; return 1; }
+  fi
   src="$CACHE/src/$NAME"; app="$src${sub:+/$sub}"; mkdir -p "$CACHE/src"
+  if [ "$UPDATE" = 1 ]; then src="$CACHE/src/$NAME-update-$$"; app="$src${sub:+/$sub}"; fi
   git -C "$repo" worktree remove --force "$src" 2>/dev/null || rm -rf "$src"; git -C "$repo" worktree prune
   git -C "$repo" worktree add -q --detach "$src" "$sha" || return 1
   WORKTREE_REPO=$repo; WORKTREE=$src
-  for f in .env .env.local; do [ -f "$APP_DIR/$f" ] && cp "$APP_DIR/$f" "$app/$f"; done
+  if [ "$UPDATE" = 1 ] && [ -n "$JOB_ID" ]; then node "$ROOT/lib/history.mjs" source "$JOB_ID" --dir "$src" --ref "$sha" || return 1; fi
+  if [ "$UPDATE" = 0 ]; then for f in .env .env.local; do [ -f "$APP_DIR/$f" ] && cp "$APP_DIR/$f" "$app/$f"; done; fi
   lock=$(lockfile_of "$src")
   echo "source: $REF at ${sha:0:7}, dependencies from ${lock:-no lockfile}"
   if [ -n "$lock" ]; then
@@ -564,6 +638,19 @@ if [ -n "$REF" ]; then
   checkout >> "$LOG" 2>&1 || { echo "checkout failed; log: $LOG"; tail -n 5 "$LOG"; exit 1; }
 fi
 cd "$APP_DIR" || exit 1
+if [ "$UPDATE" = 1 ]; then
+  node "$ROOT/lib/update.mjs" "$APP_DIR/eas.json" "$PROFILE" "$CHANNEL" "$ENVIRONMENT" "$MESSAGE" "$REF" "$PLATFORM" >/dev/null || exit 2
+  profile_env
+  export EXPO_NO_DOTENV=1 CI=1
+  echo "[UPDATE] Publishing OTA to $CHANNEL ($ENVIRONMENT, $PLATFORM)" >> "$LOG"
+  run_eas update --channel "$CHANNEL" --message "$MESSAGE" --environment "$ENVIRONMENT" --platform "$PLATFORM" --non-interactive
+  STATUS=$?
+  [ "$STATUS" = 0 ] || { echo "OTA publish failed (exit $STATUS); log: $LOG"; tail -n 8 "$LOG"; exit "$STATUS"; }
+  echo 'macbuild: update successful' >> "$LOG"
+  JOB_STATUS=success
+  echo "OTA published to $CHANNEL; log: $LOG"
+  exit 0
+fi
 # The profile decides the artifact: an IPA, a simulator .tar.gz, an APK or an AAB.
 EXT=""; SIMULATOR=0; MISSING=0
 while IFS='=' read -r key value; do
@@ -576,18 +663,7 @@ if [ -n "$JOB_ID" ]; then
 fi
 # eas.json profile env (merged with extends). eas-cli's local fingerprint and the
 # in-build one both evaluate app.config.js, so APP_VARIANT and friends must be set here.
-export EAS_BUILD_PROFILE="$PROFILE"
-eval "$(node "$ROOT/lib/profile.mjs" --export-env "$APP_DIR/eas.json" "$PROFILE" 2>/dev/null | python3 -c '
-import json, sys, shlex
-raw = sys.stdin.read().strip()
-env = json.loads(raw) if raw else {}
-if not isinstance(env, dict):
-    raise SystemExit(0)
-for key, value in env.items():
-    if not isinstance(key, str) or not key.isidentifier():
-        continue
-    print("export %s=%s" % (key, shlex.quote("" if value is None else str(value))))
-')"
+profile_env
 # Settings used after the build are checked first, so a missing one doesn't waste the build.
 if [ "$INSTALL" = 1 ]; then
   if [ "$PLATFORM" = android ]; then
@@ -668,6 +744,9 @@ if [ "$SUBMIT" = 1 ]; then
   run_eas submit --platform "$PLATFORM" --profile "${SUBMIT_PROFILE:-production}" --path "$ARTIFACT" --wait; STATUS=$?
   clean | tail -n 400 | grep -a -E 'Submitted your app|Submission details|failed|Error' | tail -4
   [ $STATUS = 0 ] || { echo "upload failed (exit $STATUS); log: $LOG"; explain; exit 1; }
+  echo 'macbuild: submission successful' >> "$LOG"
 fi
 if [ "$SKIPPED" = 1 ]; then JOB_STATUS=skipped; else JOB_STATUS=success; fi
 exit 0
+}
+main "$@"

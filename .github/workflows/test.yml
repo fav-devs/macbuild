@@ -17,3 +17,15 @@ jobs:
         run: shellcheck -S warning bin/macbuild bin/eas-guard install.sh install-ui.sh lib/agents.sh
       - run: npm ci --prefix ui --no-audit --no-fund
       - run: node --test test/*.test.mjs
+  remote-client:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test test/remote.test.mjs
+      - run: npm pack --dry-run

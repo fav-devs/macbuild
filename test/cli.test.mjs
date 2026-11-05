@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,11 +16,14 @@ const MACBUILD = join(ROOT, 'bin/macbuild');
 const FAKE_EAS = `#!/bin/bash
 case "$1" in --version) echo "eas-cli/16.0.0"; exit 0;; whoami) echo "tester"; exit 0;; esac
 echo "$* cwd=$(pwd) env=$([ -f .env ] && echo yes || echo no) APP_VARIANT=\${APP_VARIANT:-} EAS_BUILD_PROFILE=\${EAS_BUILD_PROFILE:-}" >> "$HOME/eas-calls"
+[ "$1" = update ] && { [ "\${FAKE_EAS:-}" = fail ] && { echo 'Error: OTA rejected'; exit 1; }; cat ota-source.txt > "$HOME/ota-source"; echo 'https://expo.dev/accounts/test/projects/app/updates/test-group'; exit 0; }
+[ "$1" = submit ] && { [ "\${FAKE_EAS:-}" = fail ] && exit 1; echo "Submitted your app"; exit 0; }
 out=""; while [ $# -gt 0 ]; do [ "$1" = --output ] && out=$2; shift; done
 printf '\\033[32m?\\033[39m \\033[1mReuse this distribution certificate?\\033[22m (Y/n) '
 read -r reply
 [ "$reply" = y ] || { echo "no answer: $reply"; exit 1; }
 [ "\${FAKE_EAS:-}" = slow ] && sleep 3
+[ "\${FAKE_EAS:-}" = edit ] && { echo ready > "$HOME/build-ready"; while [ ! -f "$HOME/build-release" ]; do sleep 0.1; done; }
 [ "\${FAKE_EAS:-}" = fail ] && { echo "Error: build failed"; exit 1; }
 [ "\${FAKE_EAS:-}" = provision ] && { echo "❌ error: Provisioning profile \"*[expo] com.acme.app AdHoc\" doesn't include the currently selected device \"Phone\"."; exit 1; }
 echo IPA > "$out"
@@ -46,8 +49,144 @@ function sandbox() {
   });
   const list = () => run(['list']).stdout.trim().split('\n').filter(Boolean).map((line) => line.split('|'));
   const calls = () => (existsSync(join(home, 'eas-calls')) ? readFileSync(join(home, 'eas-calls'), 'utf8') : '');
-  return { home, app, run, start, list, calls, cache: join(home, '.cache/macbuild') };
+  return { home, app, env, run, start, list, calls, cache: join(home, '.cache/macbuild') };
 }
+
+test('editing the CLI source during a build cannot break its later submission', async () => {
+  const { home, app, env, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  const copiedRoot = join(home, 'runtime');
+  mkdirSync(join(copiedRoot, 'bin'), { recursive: true });
+  symlinkSync(join(ROOT, 'lib'), join(copiedRoot, 'lib'));
+  const copied = join(copiedRoot, 'bin/macbuild');
+  copyFileSync(MACBUILD, copied);
+  const child = spawn(copied, ['myapp', '--submit', '--output', join(home, 'output.ipa')], { env: { ...env, FAKE_EAS: 'edit' } });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stderr.on('data', (chunk) => { output += chunk; });
+  const result = new Promise((resolve) => child.on('close', resolve));
+  try {
+    const deadline = Date.now() + 20000;
+    while (!existsSync(join(home, 'build-ready')) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(existsSync(join(home, 'build-ready')), output);
+    writeFileSync(copied, '#!/bin/bash\nexit 99\n) broken source\n');
+    writeFileSync(join(home, 'build-release'), 'go');
+    assert.equal(await result, 0, output);
+    assert.match(calls(), /submit --platform ios/);
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+test('submit-only uploads an existing artifact without building', () => {
+  const { home, app, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  const artifact = join(home, 'existing.ipa');
+  writeFileSync(artifact, 'original artifact');
+  writeFileSync(join(app, 'eas.json'), JSON.stringify({ build: { production: { env: { APP_VARIANT: 'store' } }, release: { extends: 'production' } }, submit: { release: {} } }));
+  const result = run(['myapp', '--profile', 'release', '--submit-only', artifact]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(calls(), /submit --platform ios --profile release --path .*existing\.ipa --non-interactive --wait/);
+  assert.match(calls(), /APP_VARIANT=store EAS_BUILD_PROFILE=release/);
+  assert.doesNotMatch(calls(), /build --platform/);
+  assert.equal(readFileSync(artifact, 'utf8'), 'original artifact');
+});
+
+function otaProject() {
+  const box = sandbox();
+  const { home, app, run } = box;
+  writeFileSync(join(app, 'eas.json'), JSON.stringify({ build: { production: { channel: 'production', environment: 'production', env: { APP_VARIANT: 'store' } } } }));
+  writeFileSync(join(app, 'package.json'), '{"name":"ota-app"}');
+  writeFileSync(join(app, 'package-lock.json'), '{"lockfileVersion":3,"packages":{}}');
+  writeFileSync(join(app, '.gitignore'), 'node_modules\n.env\n');
+  writeFileSync(join(app, 'ota-source.txt'), 'pushed source');
+  mkdirSync(join(app, 'node_modules'));
+  git(home, 'init', '-q', '--bare', 'origin.git');
+  git(app, 'init', '-q', '-b', 'main');
+  git(app, 'add', '.');
+  git(app, 'commit', '-qm', 'OTA source');
+  git(app, 'remote', 'add', 'origin', join(home, 'origin.git'));
+  git(app, 'push', '-qu', 'origin', 'main');
+  run(['add', 'myapp', app]);
+  return box;
+}
+
+test('OTA publishes only the pushed source without a build or native build lock', () => {
+  const { home, app, cache, run, calls } = otaProject();
+  writeFileSync(join(app, 'ota-source.txt'), 'uncommitted source');
+  writeFileSync(join(app, '.env'), 'APP_VARIANT=wrong');
+  mkdirSync(cache, { recursive: true });
+  symlinkSync(String(process.pid), join(cache, 'build.lock'));
+  const result = run(['update', 'myapp', '--channel', 'production', '--message', 'Fix keyboard', '--ref', 'main']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(calls(), /update --channel production --message Fix keyboard --environment production --platform all --non-interactive/);
+  assert.match(calls(), /env=no APP_VARIANT=store EAS_BUILD_PROFILE=production/);
+  assert.doesNotMatch(calls(), /build --platform|submit --platform/);
+  assert.equal(readFileSync(join(home, 'ota-source'), 'utf8'), 'pushed source');
+  assert.equal(readlinkSync(join(cache, 'build.lock')), String(process.pid));
+  const builds = join(home, '.local/share/macbuild/builds');
+  const job = JSON.parse(readFileSync(join(builds, readdirSync(builds)[0], 'meta.json'), 'utf8'));
+  assert.equal(job.action, 'update');
+  assert.equal(job.platform, 'all');
+  assert.equal(job.channel, 'production');
+  assert.equal(job.updateMessage, 'Fix keyboard');
+  assert.equal(job.environment, 'production');
+  assert.equal(job.status, 'success');
+  assert.match(job.updateUrl, /updates\/test-group/);
+  assert.equal(job.ipaBytes, undefined);
+  assert.doesNotMatch(git(app, 'worktree', 'list'), /update-/);
+});
+
+test('OTA rejects invalid inputs and propagates publish failures', () => {
+  const { run, calls } = otaProject();
+  const args = ['update', 'myapp', '--channel', 'production', '--message', 'Fix', '--ref', 'main'];
+  assert.equal(run(['update', 'myapp']).status, 2);
+  assert.equal(run([...args, '--submit']).status, 2);
+  assert.equal(calls(), '');
+  const failed = run(args, { FAKE_EAS: 'fail' });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stdout, /OTA publish failed/);
+});
+
+test('submit-only uploads an existing Android AAB without SDK setup', () => {
+  const { home, app, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  const artifact = join(home, 'existing.aab');
+  writeFileSync(artifact, 'original bundle');
+  const result = run(['myapp', '--android', '--submit-only', artifact]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(calls(), /submit --platform android --profile production --path .*existing\.aab --non-interactive --wait/);
+  assert.doesNotMatch(calls(), /build --platform/);
+});
+
+test('submit-only bypasses the build lock without removing it', () => {
+  const { home, app, cache, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  mkdirSync(cache, { recursive: true });
+  const lock = join(cache, 'build.lock');
+  symlinkSync(String(process.pid), lock);
+  const artifact = join(home, 'existing.ipa');
+  writeFileSync(artifact, 'store artifact');
+  const result = run(['myapp', '--submit-only', artifact]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(calls(), /submit --platform ios/);
+  assert.equal(readlinkSync(lock), String(process.pid));
+});
+
+test('submit-only rejects missing and incompatible artifacts and reports failures', () => {
+  const { home, app, run, calls } = sandbox();
+  run(['add', 'myapp', app]);
+  assert.equal(run(['myapp', '--submit-only', join(home, 'missing.ipa')]).status, 2);
+  const artifact = join(home, 'existing.apk');
+  writeFileSync(artifact, 'apk');
+  assert.equal(run(['myapp', '--android', '--submit-only', artifact]).status, 2);
+  const ipa = join(home, 'existing.ipa');
+  writeFileSync(ipa, 'ipa');
+  assert.equal(run(['myapp', '--submit-only', ipa, '--ref', 'main']).status, 2);
+  assert.equal(calls(), '');
+  assert.equal(run(['myapp', '--submit-only', ipa], { FAKE_EAS: 'fail' }).status, 1);
+  assert.doesNotMatch(calls(), /build --platform/);
+});
 
 test('profile env is merged across extends and exported', () => {
   const file = join(mkdtempSync(join(tmpdir(), 'macbuild-profile-')), 'eas.json');
