@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # LaunchAgents for the dashboard and menu bar. Sourced by bin/macbuild and install-ui.sh.
 UID_GUI="gui/$(id -u)"
 UI_LABEL=local.macbuild.ui
@@ -6,7 +7,9 @@ AGENTS_DIR="$HOME/Library/LaunchAgents"
 UI_PLIST="$AGENTS_DIR/$UI_LABEL.plist"
 BAR_PLIST="$AGENTS_DIR/$BAR_LABEL.plist"
 BAR_APP="$HOME/.local/share/macbuild/macbuild-menubar.app"
+# shellcheck disable=SC2034 # used by the scripts that source this file
 BAR_BIN="$BAR_APP/Contents/MacOS/macbuild-menubar"
+# shellcheck disable=SC2034
 BAR_LINK="$HOME/.local/bin/macbuild-menubar"
 
 agent_loaded() { launchctl print "$UID_GUI/$1" >/dev/null 2>&1; }

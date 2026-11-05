@@ -5,7 +5,7 @@
 // One build is running when the demo starts and another is queued behind it.
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,11 +61,12 @@ for (const [index, project] of PROJECTS.entries()) {
     submit: { production: {} },
   }, null, 2)}\n`);
   writeFileSync(join(root, '.gitignore'), 'node_modules\n.env\n');
+  writeFileSync(join(app, 'package.json'), `${JSON.stringify({ name: project.name, version: project.version, dependencies: { expo: '~54.0.0', 'expo-dev-client': '~6.0.0', 'react-native': '0.81.4' } }, null, 2)}\n`);
   // An app.json icon where the demo has one; pulse uses app.config.ts, so the dashboard falls back to a monogram.
   if (existsSync(join(HERE, `${project.name}.png`))) {
     mkdirSync(join(app, 'assets'));
     copyFileSync(join(HERE, `${project.name}.png`), join(app, 'assets/icon.png'));
-    writeFileSync(join(app, 'app.json'), `${JSON.stringify({ expo: { name: project.title, slug: project.name, version: project.version, icon: './assets/icon.png', ios: { bundleIdentifier: project.bundle } } }, null, 2)}\n`);
+    writeFileSync(join(app, 'app.json'), `${JSON.stringify({ expo: { name: project.title, slug: project.name, version: project.version, icon: './assets/icon.png', ios: { bundleIdentifier: project.bundle }, extra: { eas: { projectId: `${project.name}-4c1e-9a2b` } } } }, null, 2)}\n`);
   } else writeFileSync(join(app, 'app.config.ts'), 'export default { name: "Pulse" };\n');
   project.commits = {};
   const commit = (subject, when, author) => {
@@ -234,9 +235,27 @@ writeFileSync(join(DIR, 'ui.json'), JSON.stringify({
   ],
 }, null, 2));
 // A home folder for the server, with the folders Disk cleanup measures (their sizes come from the du stand-in).
-const HOME = join(DIR, 'home');
+const HOME = DIR; // so the projects above read as ~/code/... in setup
 for (const folder of ['Library/Developer/Xcode/DerivedData/CompilationCache.noindex', 'Library/Developer/Xcode/iOS DeviceSupport', 'Library/Caches/CocoaPods',
   '.gradle/caches', '.cache/macbuild', 'Library/Developer/CoreSimulator/Devices', 'Library/Android/sdk']) mkdirSync(join(HOME, folder), { recursive: true });
+
+// Apps for the setup page (#/setup) to find: two in the usual folders that macbuild doesn't have yet, and one the
+// agent finds outside them. The agent is a stand-in too (fake-agent.mjs, as claude and codex), so setup runs offline.
+const json = (file, data) => writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+for (const [dir, title, extra, eas] of [
+  ['code/habit', 'Habit', { 'expo-dev-client': '~6.0.0' }, null],
+  ['Developer/wallet', 'Wallet', {}, { build: { development: { developmentClient: true, distribution: 'internal' }, production: {} } }],
+  ['clients/fieldnotes', 'Field Notes', { 'expo-dev-client': '~6.0.0' }, { build: { development: { developmentClient: true, distribution: 'internal' }, production: {} } }],
+]) {
+  const app = join(HOME, dir); const slug = dir.split('/')[1];
+  mkdirSync(app, { recursive: true });
+  json(join(app, 'package.json'), { name: slug, dependencies: { expo: slug === 'wallet' ? '~53.0.0' : '~54.0.0', ...extra } });
+  json(join(app, 'app.json'), { expo: { name: title, slug, ...(slug === 'wallet' ? { ios: { bundleIdentifier: 'com.acme.wallet' } } : {}), ...(slug === 'fieldnotes' ? { ios: { bundleIdentifier: 'com.northwind.fieldnotes' }, android: { package: 'com.northwind.fieldnotes' }, extra: { eas: { projectId: '7c1d-fieldnotes' } } } : {}) } });
+  if (eas) json(join(app, 'eas.json'), eas);
+  git(app, ['init', '-q', '-b', 'main']);
+  git(app, ['remote', 'add', 'origin', `https://github.com/${slug === 'fieldnotes' ? 'northwind' : 'acme'}/${slug}.git`]);
+}
+for (const name of ['claude', 'codex']) symlinkSync(join(HERE, 'fake-agent.mjs'), join(BIN, name));
 
 // Stand-ins on PATH. git only fakes the network; everything else is real git.
 const script = (name, body) => writeFileSync(join(BIN, name), `#!/bin/bash\n${body}`, { mode: 0o755 });
@@ -258,6 +277,14 @@ script('du', `case "$2" in
   */CocoaPods) echo "2621440	$2";; */.gradle/caches) echo "4194304	$2";; */.cache/macbuild) echo "3145728	$2";; */CoreSimulator/Devices) echo "9437184	$2";;
   *) exec "$(PATH=\${PATH#*:} command -v du)" "$@";;
 esac
+`);
+// A paired iPhone, for setup's "install builds on which iPhone?".
+script('xcrun', `[ "$1 $2 $3" = "devicectl list devices" ] || exit 1
+out=""; while [ $# -gt 0 ]; do [ "$1" = --json-output ] && out=$2; shift; done
+echo '{"result":{"devices":[{"identifier":"8A4F2C1E-5B6D-4E7F-9A0B-1C2D3E4F5A6B","connectionProperties":{"transportType":"localNetwork","pairingState":"paired"},"hardwareProperties":{"udid":"00008140-001A2D3E0C38801C","marketingName":"iPhone 16 Pro","deviceType":"iPhone"},"deviceProperties":{"name":"Alex’s iPhone"}}]}}' > "$out"
+`);
+// npx expo install, for setup's fixes: adds the package to package.json the way expo install would.
+script('npx', `node -e 'const f="package.json";const p=require(require("path").resolve(f));p.dependencies[process.argv[1]]="~6.0.0";require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\\n")' "\${@: -1}"; echo "› Installed \${@: -1}"
 `);
 script('pmset', `echo "Now drawing from 'AC Power'"; echo " -InternalBattery-0 (id=4653155)	100%; charged; 0:00 remaining present: true"\n`);
 const expo = (project) => ({
@@ -284,6 +311,7 @@ data() { node -e 'const d=require(process.argv[1])[process.argv[2]];const v=proc
 case "$1" in
   --version) echo "eas-cli/16.20.0 darwin-arm64 node-v22.17.0";;
   whoami) echo acme;;
+  init) node -e 'const f="app.json";const p=require(require("path").resolve(f));p.expo.extra={...p.expo.extra,eas:{projectId:"5e2a-"+p.expo.slug}};require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\\n")'; echo "✔ Linked to @acme";;
   project:info) data info;;
   submit:list) data submissions;;
   channel:list) data channels;;
@@ -331,6 +359,7 @@ const server = spawn(process.execPath, [join(HERE, '..', 'server.mjs')], {
     ...process.env, HOME, PATH: `${BIN}:${process.env.PATH}`, MACBUILD_UI_PORT: String(PORT), MACBUILD_BIN: join(BIN, 'macbuild'),
     MACBUILD_DATA: DATA, MACBUILD_PROJECTS: join(DIR, 'projects.conf'), MACBUILD_CONFIG: join(DIR, 'ui.json'), MACBUILD_APPLE_TEAM: 'T3AM1D2345',
     DEMO_BUILD_SECONDS: process.env.DEMO_BUILD_SECONDS ?? '600',
+    FAKE_AGENT_DELAY: process.env.FAKE_AGENT_DELAY ?? '420', FAKE_AGENT_EXTRA: join(HOME, 'clients/fieldnotes'), MACBUILD_NO_TERMINAL: '1',
   },
 });
 const post = (body) => fetch(`http://127.0.0.1:${PORT}/api/builds`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify(body) });

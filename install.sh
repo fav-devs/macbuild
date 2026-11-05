@@ -6,6 +6,8 @@
 #   --guard      refuse EAS cloud builds on this Mac (wraps the global eas command)
 #   --unguard    remove that wrapper
 #   --uninstall  remove macbuild, the wrapper, the web UI service and the build cache (keeps settings and build history)
+# In a terminal, it ends with the guided setup (macbuild setup). Run by an agent or a script, it adds every Expo app it
+# finds and prints macbuild doctor instead.
 set -e
 UI=0; GUARD=0; UNGUARD=0; UNINSTALL=0
 for arg in "$@"; do case "$arg" in --ui) UI=1;; --guard) GUARD=1;; --unguard) UNGUARD=1;; --uninstall) UNINSTALL=1; UNGUARD=1;; *) echo "unknown option $arg"; exit 2;; esac; done
@@ -38,7 +40,10 @@ mkdir -p "$HOME/.local/bin" "$HOME/.config/macbuild"
 ln -sf "$HERE/bin/macbuild" "$HOME/.local/bin/macbuild"
 [ -f "$HOME/.config/macbuild/env" ] || cp "$HERE/env.example" "$HOME/.config/macbuild/env"
 chmod 600 "$HOME/.config/macbuild/env"
-"$HERE/bin/macbuild" scan || true
+# Someone at a terminal gets the guided setup, which asks which apps to add. Even with curl | bash, /dev/tty is them.
+INTERACTIVE=0
+if [ -t 1 ] && [ -z "${CI:-}" ] && (: < /dev/tty) 2>/dev/null; then INTERACTIVE=1; fi
+[ "$INTERACTIVE" = 1 ] || "$HERE/bin/macbuild" scan || true
 if [ "$GUARD" = 1 ]; then
   eas_paths | while read -r e; do
     d=$(dirname "$e")
@@ -48,4 +53,9 @@ if [ "$GUARD" = 1 ]; then
 fi
 [ "$UI" = 1 ] && "$HERE/install-ui.sh"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo 'Add to your shell profile: export PATH="$HOME/.local/bin:$PATH"';; esac
+if [ "$INTERACTIVE" = 1 ]; then
+  # Asks "here or in the browser?" the first time; once setup is done or put off it exits 3 and the status follows.
+  rc=0; "$HERE/bin/macbuild" setup --first-run < /dev/tty || rc=$?
+  [ "$rc" = 3 ] || exit 0
+fi
 echo; "$HERE/bin/macbuild" doctor || echo; echo "Next: macbuild <project>   (macbuild list shows your projects)"

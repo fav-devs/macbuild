@@ -7,7 +7,7 @@
   "engines": { "node": ">=22" },
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/fav-devs/macbuild.git" },
-  "files": ["bin/", "lib/", "ui/server.mjs", "ui/public/", "ui/package.json", "ui/package-lock.json", "macos/", "install.sh", "install-ui.sh", "env.example", "AGENTS.md"],
+  "files": ["bin/", "lib/", "skills/", "ui/server.mjs", "ui/public/", "ui/package.json", "ui/package-lock.json", "macos/", "install.sh", "install-ui.sh", "env.example", "AGENTS.md"],
   "scripts": { "test": "node --test test/*.test.mjs" },
   "dependencies": { "qrcode": "^1.5.4", "web-push": "^3.6.7" }
 }

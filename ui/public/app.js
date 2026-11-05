@@ -132,7 +132,7 @@ function avatar(name, size = '') {
 
 // Server
 const shell = { projects: [], system: null };
-const routing = { token: 0, controller: new AbortController(), timers: [] };
+const routing = { token: 0, controller: new AbortController(), timers: [], first: true };
 async function get(path) {
   const { signal } = routing.controller;
   const response = await fetch(path, { cache: 'no-store', signal });
@@ -1174,72 +1174,195 @@ function setupBanner(setup) {
   const box = $('#setup-banner');
   if (!box || setup.setupComplete) return;
   const miss = (setup.doctor?.items ?? []).filter((item) => item.status === 'miss').length;
-  if (!miss) return;
-  box.innerHTML = `<div class="banner">${icon('mac')}<span>${plural(miss, 'setup item')} to fix</span><a class="btn sm" href="#/setup" style="margin-left:auto">Guide</a><button class="btn ghost sm" data-hide-setup aria-label="Dismiss">${icon('x')}</button></div>`;
+  const unfinished = setup.flow && !setup.flow.done;
+  if (!unfinished && !miss) return;
+  const text = unfinished ? (setup.flow.started ? 'Finish setting up macbuild' : 'Set up macbuild: find your apps, set up signing and try a build') : `${plural(miss, 'setup item')} to fix`;
+  box.innerHTML = `<div class="banner">${icon(unfinished ? 'cube' : 'mac')}<span>${text}</span><a class="btn sm" href="#/setup" style="margin-left:auto">${unfinished ? (setup.flow.started ? 'Continue' : 'Start') : 'Guide'}</a><button class="btn ghost sm" data-hide-setup aria-label="Dismiss">${icon('x')}</button></div>`;
   box.querySelector('[data-hide-setup]').onclick = async () => { await post('/api/setup', { setupComplete: true }); box.innerHTML = ''; };
 }
-const SETUP_STEPS = [['tools', 'Tools'], ['apps', 'Apps'], ['mac', 'This Mac'], ['phone', 'Phone']];
 function doctorRows(items) {
   return `<div class="rows">${(items ?? []).map((item) => `<div class="row compact">
     <span class="st ${item.status === 'ok' ? 'success' : item.status === 'miss' ? 'failed' : ''}">${icon(item.status === 'ok' ? 'check' : item.status === 'miss' ? 'cross' : 'skip')}</span>
     <span class="main"><span class="title">${esc(item.label)}</span><span class="meta wrap">${esc(item.detail)}</span></span>
   </div>`).join('')}</div>`;
 }
+
+// Setup: lib/setup.mjs sends a screen (title, the agent's words, fields, commands, buttons) and this draws it. The
+// same screens are the terminal's `macbuild setup`; whatever the agent asks becomes a choice, a checklist or a text box.
+const NOTE_ICON = { ok: 'check', bad: 'cross', warn: 'alert', info: 'dot' };
+ICONS.dot = '<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/>';
+ICONS.sparkle = '<path d="M12 3.5c.6 4.3 2.2 5.9 6.5 6.5-4.3.6-5.9 2.2-6.5 6.5-.6-4.3-2.2-5.9-6.5-6.5 4.3-.6 5.9-2.2 6.5-6.5z"/><path d="M19 15.5c.3 1.8.9 2.4 2.5 2.7-1.6.3-2.2.9-2.5 2.7-.3-1.8-.9-2.4-2.5-2.7 1.6-.3 2.2-.9 2.5-2.7z"/>';
+ICONS.terminal = '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7.5 9.5 3 2.5-3 2.5M12.5 15h4"/>';
+ICONS.copy = '<rect x="8.5" y="8.5" width="12" height="12" rx="2.2"/><path d="M15.5 8.5V6a2.5 2.5 0 0 0-2.5-2.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5"/>';
+function setupNotes(notes) {
+  if (!notes?.length) return '';
+  const plain = notes.filter((note) => !note.code);
+  const code = notes.filter((note) => note.code);
+  return `${plain.length ? `<ul class="wz-notes">${plain.map((note) => `<li class="${esc(note.tone)}">${icon(NOTE_ICON[note.tone] ?? 'dot')}<span>${esc(note.text)}</span></li>`).join('')}</ul>` : ''}
+    ${code.length ? `<div class="wz-next">${code.map((note) => `<div class="wz-cmd"><code>${esc(note.code)}</code><span>${esc(note.text)}</span><button type="button" class="btn ghost sm" data-copy="${esc(note.code)}" aria-label="Copy">${icon('copy')}</button></div>`).join('')}</div>` : ''}`.trim();
+}
+function setupField(field, attached = []) {
+  const name = esc(field.id);
+  const help = field.help ? `<small>${esc(field.help)}</small>` : '';
+  if (field.kind === 'select' || field.kind === 'multi') {
+    const multi = field.kind === 'multi';
+    const chosen = new Set(multi ? field.value ?? [] : [field.value]);
+    // An answer a fix needs (a bundle identifier) sits inside that fix's card.
+    const inner = (option) => attached.filter((item) => item.attach.option === option.value);
+    return `<fieldset class="wz-field" data-field="${name}" data-kind="${field.kind}"><legend>${esc(field.label)}</legend>${help}
+      <div class="wz-options">${field.options.map((option) => `<div class="wz-option${option.disabled ? ' off' : ''}"><label class="wz-row">
+        <input type="${multi ? 'checkbox' : 'radio'}" name="${name}" value="${esc(option.value)}" ${chosen.has(option.value) || (multi && option.disabled && option.badge) ? 'checked' : ''} ${option.disabled ? 'disabled' : ''}>
+        <span class="wz-box" aria-hidden="true"></span>
+        <span class="wz-text"><span class="wz-label">${option.tag ? `<span class="wz-tag">${esc(option.tag)}</span>` : ''}${esc(option.label)}${option.badge ? `<span class="wz-badge">${esc(option.badge)}</span>` : ''}</span>${option.detail ? `<span class="wz-detail">${esc(option.detail)}</span>` : ''}</span>
+      </label>${inner(option).map((item) => `<div class="wz-inline" data-field="${esc(item.id)}" data-kind="text"><input class="input mono" name="${esc(item.id)}" value="${esc(item.value ?? '')}" placeholder="${esc(item.placeholder ?? '')}" aria-label="${esc(item.label)}" autocomplete="off" autocapitalize="off" spellcheck="false">${item.help ? `<small>${esc(item.help)}</small>` : ''}</div>`).join('')}</div>`).join('')}</div></fieldset>`;
+  }
+  if (field.kind === 'confirm') {
+    return `<label class="wz-field wz-switch toggle" data-field="${name}" data-kind="confirm"><span><b>${esc(field.label)}</b>${field.help ? `<small>${esc(field.help)}</small>` : ''}</span><input class="switch" type="checkbox" name="${name}" ${field.value !== false ? 'checked' : ''}></label>`;
+  }
+  return `<label class="wz-field" data-field="${name}" data-kind="text"><span class="wz-legend">${esc(field.label)}</span>${help}
+    <input class="input" name="${name}" value="${esc(field.value ?? '')}" placeholder="${esc(field.placeholder ?? '')}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>`;
+}
+function setupCommands(commands) {
+  if (!commands?.length) return '';
+  const needed = commands.filter((command) => !command.optional || command.status === 'done');
+  const extra = commands.filter((command) => command.optional && command.status !== 'done');
+  const rows = (items) => `<div class="wz-commands">${items.map(setupCommand).join('')}</div>`;
+  const what = extra.some((command) => command.id.startsWith('signing:')) ? 'For TestFlight, Google Play and Android builds' : 'Optional';
+  return `${needed.length ? rows(needed) : ''}${extra.length ? `<details class="wz-more"${needed.length ? '' : ' open'}><summary>${icon('right', 'sm')}${what}<span class="faint">${extra.length}</span></summary>${rows(extra)}</details>` : ''}`;
+}
+function setupCommand(command) {
+  return `<div class="wz-command ${esc(command.status)}" data-command="${esc(command.id)}">
+    <span class="st ${command.status === 'done' ? 'success' : command.status === 'failed' ? 'failed' : ''}">${icon(command.status === 'done' ? 'check' : command.status === 'failed' ? 'cross' : 'clock')}</span>
+    <div class="wz-command-main"><b>${esc(command.label)}</b>${command.status === 'failed' ? '<span class="wz-badge bad">Didn’t finish</span>' : ''}${command.detail ? `<p>${esc(command.detail)}</p>` : ''}</div>
+    ${command.status === 'done' ? '' : `<code>${esc(command.display)}</code>`}
+    ${command.status === 'done' ? '' : `<div class="wz-command-do">
+      <button type="button" class="btn sm" data-terminal="${esc(command.id)}">${icon('terminal')}Open Terminal</button>
+      <button type="button" class="btn ghost sm" data-copy="${esc(command.line)}" aria-label="Copy the command">${icon('copy')}</button>
+    </div>`}
+  </div>`;
+}
+function setupBusy(busy) {
+  const lines = busy.activity ?? [];
+  return `<div class="wz-busy" aria-live="polite">
+    <div class="wz-busy-head"><span class="wz-orbit${busy.agent ? ' agent' : ''}">${icon(busy.agent ? 'sparkle' : 'cube')}</span>
+      <div><b>${esc(busy.label)}</b><span class="faint num" data-since="${busy.startedAt}">${span(Date.now() - busy.startedAt)}</span></div></div>
+    <ol class="wz-feed">${lines.map((line, index) => `<li class="${index === lines.length - 1 ? 'now' : ''}">${esc(line)}</li>`).join('') || '<li class="now">Starting…</li>'}</ol>
+  </div>`;
+}
+function setupStepper(view) {
+  return `<ol class="wz-steps">${view.steps.map((step, index) => `<li class="${step.state}">${step.state === 'done' && view.step !== 'done' ? `<button type="button" data-goto="${esc(step.id)}">` : '<span>'}<i>${step.state === 'done' ? icon('check') : index + 1}</i><em>${esc(step.label)}</em>${step.state === 'done' && view.step !== 'done' ? '</button>' : '</span>'}</li>`).join('')}</ol>`;
+}
+function setupCard(view) {
+  const buttons = view.buttons ?? [];
+  const main = view.fields.filter((field) => !field.for && !field.attach);
+  const attached = (field) => view.fields.filter((item) => item.attach?.field === field.id);
+  const tucked = (id) => view.fields.filter((field) => field.for === id);
+  const primary = buttons.find((button) => button.primary) ?? buttons[0];
+  const others = buttons.filter((button) => button !== primary);
+  const button = (item, cls) => (item.href ? `<a class="btn ${cls}" href="${esc(item.href)}">${esc(item.label)}</a>`
+    : `<button type="${item === primary ? 'submit' : 'button'}" class="btn ${cls}" data-button="${esc(item.id)}" ${tucked(item.id).length ? 'data-reveal' : ''}>${esc(item.label)}</button>`);
+  const done = view.step === 'done';
+  return `<form class="wz-card" id="wz-form" novalidate>
+    ${done ? `<div class="wz-done">${icon('check')}</div>` : ''}
+    <h1>${esc(view.title)}</h1>
+    ${view.lead ? (view.by
+      ? `<figure class="wz-agent"><figcaption>${icon('sparkle')}${esc(view.by)}</figcaption><blockquote>${esc(view.lead)}</blockquote></figure>`
+      : `<p class="wz-lead">${esc(view.lead)}</p>`) : ''}
+    ${view.busy ? setupBusy(view.busy) : ''}
+    <div class="wz-live">${setupNotes(view.notes)}</div>
+    ${main.map((field) => setupField(field, attached(field))).join('')}
+    <div class="wz-live-commands">${setupCommands(view.commands)}</div>
+    ${others.filter((item) => tucked(item.id).length).map((item) => `<div class="wz-tucked" data-for="${esc(item.id)}" hidden>${tucked(item.id).map(setupField).join('')}<button type="button" class="btn" data-button="${esc(item.id)}" data-go>${esc(item.label)}</button></div>`).join('')}
+    ${buttons.length || view.back ? `<div class="wz-actions">
+      ${view.back && !view.busy ? `<button type="button" class="btn ghost" data-back="${esc(view.back)}">${icon('left')}Back</button>` : '<span></span>'}
+      <div class="wz-buttons">${others.map((item) => button(item, view.busy ? '' : 'ghost')).join('')}${primary ? button(primary, view.busy ? '' : 'primary') : ''}</div>
+    </div>` : ''}
+  </form>`;
+}
+function setupValues(form) {
+  const values = {};
+  form.querySelectorAll('[data-field]').forEach((box) => {
+    const name = box.dataset.field; const kind = box.dataset.kind;
+    if (kind === 'multi') values[name] = [...box.querySelectorAll('input:checked:not(:disabled)')].map((input) => input.value);
+    else if (kind === 'select') values[name] = box.querySelector('input:checked')?.value ?? '';
+    else if (kind === 'confirm') values[name] = box.querySelector('input').checked;
+    else values[name] = box.querySelector('input').value;
+  });
+  return values;
+}
 async function setupPage() {
-  const data = await get('/api/setup');
-  const miss = (data.doctor?.items ?? []).filter((item) => item.status === 'miss');
-  const step = prefs.setupStep ?? (miss.length ? 'tools' : data.projects.length ? 'mac' : 'apps');
-  const tools = data.doctor?.items ?? [];
-  const pane = {
-    tools: card('Tools', 'gear', tools.length ? doctorRows(tools) : empty('gear', 'Couldn’t read doctor', esc(data.doctor?.error ?? ''))),
-    apps: card('Apps', 'apps', data.projects.length
-      ? `<div class="rows">${data.projects.map((name) => `<a class="row" href="#/p/${esc(name)}">${avatar(name, 'sm')}<span class="main"><span class="title">${esc(name)}</span></span></a>`).join('')}</div>`
-      : empty('apps', 'No apps yet', 'Scan the usual project folders, or add one with macbuild add.'),
-    '<button class="btn sm" id="scan">Scan</button>'),
-    mac: card('This Mac', 'mac', `<div class="rows">
-      <label class="toggle"><span><b>Open at login</b></span><input class="switch" type="checkbox" id="login-at-login" ${data.loginAtLogin ? 'checked' : ''}></label>
-      <label class="toggle"><span><b>Menu bar</b></span><input class="switch" type="checkbox" id="menubar" ${data.menubar ? 'checked' : ''}></label>
-    </div>`),
-    phone: card('Phone', 'phone', `<div class="setting">
-      <div><b>This Mac</b><p class="hint mono" id="local-url">${esc(data.localUrl)}</p></div>
-      <div><b>On your tailnet</b><p class="hint mono" id="phone-url">${esc(data.phoneUrl || 'Tailscale not publishing HTTPS yet')}</p></div>
-      <div class="inline">${data.phoneUrl ? '<button class="btn sm" id="copy-phone">Copy phone URL</button>' : ''}<button class="btn sm ghost" id="copy-local">Copy local URL</button></div>
-    </div>`),
-  };
-  app.innerHTML = `${mobileTop()}${header('Setup', '', `<a class="btn ghost sm" href="#/settings">${icon('left')}Settings</a>`)}
-    <div class="setup">
-      <div class="seg" role="tablist">${SETUP_STEPS.map(([key, label]) => `<button data-step="${key}" class="${step === key ? 'on' : ''}" aria-selected="${step === key}">${label}</button>`).join('')}</div>
-      ${pane[step] ?? pane.tools}
-      <div class="setup-foot">
-        ${miss.length ? `<p class="hint">${plural(miss.length, 'item')} still missing</p>` : '<p class="hint ok">Ready to build</p>'}
-        <button class="btn primary" id="setup-done">${miss.length ? 'Done for now' : 'Done'}</button>
-      </div>
-    </div>`;
-  const save = async (changes) => {
-    const result = await post('/api/setup', changes);
-    if (result.error) { flash(result.error, true); return; }
-    route();
-  };
-  const login = $('#login-at-login');
-  if (login) login.onchange = () => save({ loginAtLogin: login.checked });
-  const bar = $('#menubar');
-  if (bar) bar.onchange = () => save({ menubar: bar.checked });
-  app.onclick = async (event) => {
-    const next = event.target.closest('[data-step]');
-    if (next) { prefs.setupStep = next.dataset.step; setupPage().catch(() => {}); return; }
-    if (event.target.closest('#scan')) {
-      event.target.closest('#scan').disabled = true;
-      await post('/api/projects/scan');
-      route();
+  let view = await get('/api/setup/flow');
+  let shape = '';
+  const draw = (next) => {
+    view = next;
+    // Same step and nothing to type into changed: refresh only what moves, so half-filled answers stay.
+    const key = JSON.stringify([view.step, Boolean(view.busy), view.title, view.fields.map((field) => [field.id, field.options?.length]), view.buttons.map((item) => item.id), view.commands.map((item) => item.id)]);
+    if (key === shape && !view.busy && $('#wz-form')) {
+      $('.wz-live').innerHTML = setupNotes(view.notes);
+      const open = $('.wz-more')?.open;
+      $('.wz-live-commands').innerHTML = setupCommands(view.commands);
+      if (open && $('.wz-more')) $('.wz-more').open = true;
       return;
     }
-    if (event.target.closest('#copy-phone') && data.phoneUrl) {
-      try { await navigator.clipboard.writeText(data.phoneUrl); flash('Copied'); } catch { flash(data.phoneUrl); }
+    if (key === shape && view.busy && $('.wz-busy')) { $('.wz-busy').outerHTML = setupBusy(view.busy); tick(); return; }
+    shape = key;
+    app.innerHTML = `<div class="wizard">
+      <header class="wz-top"><a class="brand" href="#/"><span class="mark">${icon('cube')}</span>macbuild<span class="tag">setup</span></a><a class="btn ghost sm" href="#/">${view.step === 'done' ? 'Close' : 'Finish later'}</a></header>
+      ${setupStepper(view)}
+      ${setupCard(view)}
+    </div>`;
+    tick();
+    const first = $('#wz-form input.input');
+    if (first && matchMedia('(min-width: 720px)').matches) first.focus();
+  };
+  const send = async (button, values = {}, from) => {
+    const form = $('#wz-form');
+    form?.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+    from?.classList.add('working');
+    const response = await fetch('/api/setup/flow', { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify({ step: view.step, button, values }) });
+    const result = await response.json().catch(() => ({}));
+    if (result.error) flash(result.error, true);
+    draw(result.view ?? (result.step ? result : await get('/api/setup/flow')));
+    if (view.step !== 'done') loadShell();
+  };
+  draw(view);
+  every(() => (view.busy ? 900 : view.commands.some((item) => item.status !== 'done') ? 2500 : 0) || 5000, async () => {
+    if (!view.busy && !view.commands.some((item) => item.status !== 'done')) return;
+    draw(await get('/api/setup/flow'));
+  });
+  app.onsubmit = (event) => {
+    event.preventDefault();
+    const primary = view.buttons.find((item) => item.primary) ?? view.buttons[0];
+    if (primary && !primary.href) send(primary.id, setupValues(event.target), event.submitter);
+  };
+  app.onclick = async (event) => {
+    const target = event.target.closest('button, a');
+    if (!target) return;
+    if (target.dataset.copy !== undefined) {
+      try { await navigator.clipboard.writeText(target.dataset.copy); flash('Copied'); } catch { flash(target.dataset.copy); }
+      return;
     }
-    if (event.target.closest('#copy-local')) {
-      try { await navigator.clipboard.writeText(data.localUrl); flash('Copied'); } catch { flash(data.localUrl); }
+    if (target.dataset.terminal) {
+      target.disabled = true;
+      const result = await post('/api/setup/terminal', { id: target.dataset.terminal });
+      target.disabled = false;
+      if (result.error) {
+        try { if (result.line) await navigator.clipboard.writeText(result.line); } catch {}
+        flash(result.line ? `${result.error} It’s copied.` : result.error, true);
+      } else flash(`Opened Terminal on ${machineName()}`);
+      return;
     }
-    if (event.target.closest('#setup-done')) { await save({ setupComplete: true }); location.hash = '#/'; }
+    if (target.dataset.back || target.dataset.goto) { send('back', { to: target.dataset.back || target.dataset.goto }, target); return; }
+    if (target.dataset.button && target.type !== 'submit') {
+      const tucked = target.hasAttribute('data-reveal') && $(`.wz-tucked[data-for="${target.dataset.button}"]`);
+      if (tucked && tucked.hidden) { tucked.hidden = false; tucked.querySelector('input')?.focus(); target.hidden = true; return; }
+      send(target.dataset.button, setupValues($('#wz-form')), target);
+    }
+  };
+  app.onkeydown = (event) => {
+    // Enter in a tucked-away field (the folder to search) runs its own button, not the step's.
+    const tucked = event.target.closest?.('.wz-tucked');
+    if (event.key === 'Enter' && tucked) { event.preventDefault(); tucked.querySelector('[data-go]').click(); }
   };
 }
 
@@ -1408,9 +1531,18 @@ async function route() {
   routing.controller.abort(); routing.controller = new AbortController();
   routing.timers.forEach(clearTimeout); routing.timers = [];
   hideTip(); toast('');
-  app.onclick = null; app.onchange = null;
+  app.onclick = null; app.onchange = null; app.onsubmit = null; app.onkeydown = null;
   const where = parseRoute();
+  if (routing.first) {
+    // A new install with no apps yet opens on setup.
+    routing.first = false;
+    if (where.page === 'builds' && !shell.projects.length) {
+      const flow = await get('/api/setup').then((data) => data.flow).catch(() => null);
+      if (flow && !flow.done) { location.replace('#/setup'); return; } // hashchange routes again
+    }
+  }
   app.dataset.page = where.page;
+  document.body.classList.toggle('focus', where.page === 'setup');
   renderShell(where);
   try {
     await PAGES[where.page](where);
