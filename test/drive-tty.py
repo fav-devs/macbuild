@@ -57,7 +57,12 @@ for pattern, keys in script['steps']:
     at = found.end()
     time.sleep(script.get('pause', 0.15))
     for key in keys if isinstance(keys, list) else [keys]:
-        os.write(fd, key.encode())
+        if not key:
+            continue
+        try:
+            os.write(fd, key.encode())
+        except OSError:
+            break  # the program has exited (macOS says EIO)
         time.sleep(script.get('keyPause', 0.05))
         pump(0.02)
 

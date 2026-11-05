@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -22,7 +22,8 @@ const DEV = { build: { development: { developmentClient: true, distribution: 'in
 // A home folder with: a ready app, a monorepo app missing its bundle identifier, an app without eas.json, an example
 // inside node_modules that must be skipped, and one app outside the usual folders that only the agent finds.
 function home({ agents = ['claude'] } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'macbuild-setup-'));
+  // The real path: on macOS the temp folder is behind a symlink, and setup keeps real paths.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'macbuild-setup-')));
   const app = (path, deps, expo, eas) => {
     json(join(dir, path, 'package.json'), { dependencies: { expo: '~54.0.0', ...deps } });
     if (expo) json(join(dir, path, 'app.json'), { expo });
