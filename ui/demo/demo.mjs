@@ -1,15 +1,18 @@
 // The dashboard with sample projects and builds, for working on the UI and for the README screenshots. Nothing here
 // touches your real projects or settings: everything lives in a temporary folder, and eas, gh, git's network calls,
 // xcodebuild and pmset are stand-ins.
-//   node ui/demo/demo.mjs [--port 4181]     then open http://localhost:4181
+//   node ui/demo/demo.mjs [--port 4181]     then open http://localhost:4181 (setup: #/setup)
+// The terminal setup runs in a browser on the next port (http://localhost:4182): the real `macbuild setup`, here.
 // One build is running when the demo starts and another is queued behind it.
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnose } from '../../lib/diagnose.mjs';
+import { startTerminal } from './terminal.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 0) || 4181;
@@ -224,6 +227,28 @@ const history = [
 // Oldest first, so a reused build and a size change can refer to the build before.
 for (const [project, options] of history.sort((a, b) => b[1].ago - a[1].ago)) seedBuild(project, options);
 
+// OTA updates, for the project's OTA page: notes on both channels, one that failed, and one for recipes.
+function seedUpdate(project, { ago, branch = 'main', step = 0, channel, platform = 'all', status = 'success', message, by, reason }) {
+  const commits = project.commits[branch];
+  const commit = commits[Math.max(0, commits.length - 1 - step)];
+  const createdAt = NOW - ago; const startedAt = createdAt + 1500; const finishedAt = startedAt + 95000;
+  const group = createHash('sha1').update(`${project.name}${ago}`).digest('hex');
+  const build = {
+    id: `${new Date(createdAt).toISOString().replace(/\D/g, '').slice(0, 14)}-update-${project.name}`, project: project.name, action: 'update', profile: channel, channel, environment: channel,
+    platform, updateMessage: message, ref: branch, source: 'github', trigger: 'manual', by: by ? { name: by, login: `${by.split(' ')[0].toLowerCase()}@acme.dev` } : null,
+    status, createdAt, startedAt, finishedAt, phases: [{ name: 'UPDATE', at: startedAt }], repo: project.repo,
+    commit: { hash: commit.hash, short: commit.hash.slice(0, 7), subject: commit.subject, author: commit.author, date: commit.when, url: `https://github.com/${project.repo}/commit/${commit.hash}` },
+    ...(status === 'success' ? { updateUrl: `https://expo.dev/accounts/acme/projects/${project.name}/updates/${group.slice(0, 8)}-${group.slice(8, 12)}-4${group.slice(13, 16)}-a${group.slice(17, 20)}-${group.slice(20, 32)}` } : { reason }),
+  };
+  const log = `[UPDATE] Exporting ${platform === 'all' ? 'iOS and Android' : platform} bundles\n[UPDATE] Uploading 4 assets\n${status === 'success' ? `[UPDATE] ✔ Published!\n[UPDATE] Branch ${channel}\n[UPDATE] Update group ${build.updateUrl}\n` : `[UPDATE] ${reason}\n`}`;
+  writeBuild(build, log);
+}
+seedUpdate(notes, { ago: 5 * HOUR, channel: 'preview', platform: 'ios', message: 'Search across notebooks', by: 'Priya Natarajan', step: 2 });
+seedUpdate(notes, { ago: 1.2 * DAY, channel: 'production', message: 'Fix keyboard overlap on login', by: 'Alex Rivera', step: 1 });
+seedUpdate(notes, { ago: 2.4 * DAY, channel: 'preview', message: 'Pin notes to the top', status: 'failed', reason: 'Error: EXPO_PUBLIC_API_URL is not set in the preview environment', by: 'Sam Chen', step: 4 });
+seedUpdate(notes, { ago: 4.5 * DAY, channel: 'production', message: 'Speed up image cache', by: 'Alex Rivera', step: 3 });
+seedUpdate(recipes, { ago: 2 * DAY, channel: 'production', message: 'Localize into Spanish', by: 'Jordan Lee', step: 2 });
+
 // Automatic builds: every push to notes' main, its pull requests, and recipes to TestFlight every night. All up to date.
 const today = new Date(); const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 writeFileSync(join(DIR, 'ui.json'), JSON.stringify({
@@ -311,6 +336,11 @@ data() { node -e 'const d=require(process.argv[1])[process.argv[2]];const v=proc
 case "$1" in
   --version) echo "eas-cli/16.20.0 darwin-arm64 node-v22.17.0";;
   whoami) echo acme;;
+  credentials:configure-build) echo "✔ Logged in as acme"; sleep 0.6
+    echo "✔ Using remote iOS credentials (Expo server)"; sleep 0.6
+    echo "  Distribution certificate   valid for 290 more days"
+    echo "  Provisioning profile       AdHoc, 4 registered devices"; sleep 0.4
+    echo "✔ All credentials are ready to build";;
   init) node -e 'const f="app.json";const p=require(require("path").resolve(f));p.expo.extra={...p.expo.extra,eas:{projectId:"5e2a-"+p.expo.slug}};require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\\n")'; echo "✔ Linked to @acme";;
   project:info) data info;;
   submit:list) data submissions;;
@@ -341,7 +371,8 @@ script('macbuild', `case "$1" in
   scan) exit 0;;
 esac
 out=""; for a in "$@"; do [ "$prev" = --output ] && out=$a; prev=$a; done
-say() { echo "[$1] $2" >> "$MACBUILD_LOG"; }
+LOG=\${MACBUILD_LOG:-/dev/stdout}
+say() { echo "[$1] $2" >> "$LOG"; }
 for phase in SETUP_WORKINGDIR START_BUILD READ_EAS_JSON READ_PACKAGE_JSON; do say $phase "Starting"; sleep 0.4; done
 say INSTALL_DEPENDENCIES 'Running "npm ci --include=dev"'; sleep 3; say INSTALL_DEPENDENCIES "added 1284 packages in 49s"
 for phase in READ_APP_CONFIG RUN_EXPO_DOCTOR PREPARE_CREDENTIALS PREBUILD; do say $phase "Done"; sleep 1; done
@@ -349,17 +380,31 @@ say INSTALL_PODS "Installing pods"; sleep 3; say INSTALL_PODS "Pod installation 
 say RUN_FASTLANE 'Running "fastlane ios build"'
 end=$((SECONDS + \${DEMO_BUILD_SECONDS:-60})); n=0
 while [ $SECONDS -lt $end ]; do n=$((n + 1)); say RUN_FASTLANE "▸ Compiling module $n of 412"; sleep 0.5; done
-say RUN_FASTLANE "** ARCHIVE SUCCEEDED **"; say PREPARE_ARTIFACTS "Preparing artifacts"; echo "Build successful" >> "$MACBUILD_LOG"
-echo demo > "$out"
+say RUN_FASTLANE "** ARCHIVE SUCCEEDED **"; say PREPARE_ARTIFACTS "Preparing artifacts"; echo "Build successful" >> "$LOG"
+[ -z "$out" ] || echo demo > "$out"
 `);
 
+// The dashboard listens on an inner port behind a small proxy that names it as 127.0.0.1, so the demo also opens
+// through preview proxies that send their own Host. The real dashboard answers only loopback and tailnet names.
+const INNER = PORT + 1000;
+const ENV = {
+  ...process.env, HOME, PATH: `${BIN}:${process.env.PATH}`, MACBUILD_BIN: join(BIN, 'macbuild'),
+  MACBUILD_DATA: DATA, MACBUILD_PROJECTS: join(DIR, 'projects.conf'), MACBUILD_CONFIG: join(DIR, 'ui.json'),
+  FAKE_AGENT_DELAY: process.env.FAKE_AGENT_DELAY ?? '420', FAKE_AGENT_EXTRA: join(HOME, 'clients/fieldnotes'), MACBUILD_NO_TERMINAL: '1',
+};
+createServer((req, res) => {
+  const upstream = httpRequest({ host: '127.0.0.1', port: INNER, path: req.url, method: req.method, headers: { ...req.headers, host: `127.0.0.1:${INNER}` } }, (reply) => {
+    res.writeHead(reply.statusCode, reply.headers); reply.pipe(res);
+  });
+  upstream.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+  req.pipe(upstream);
+}).listen(PORT, '127.0.0.1');
+// The terminal setup in a browser, on the next port: the real `macbuild setup` against these sample apps.
+const terminal = startTerminal({ port: PORT + 1, env: { ...ENV, MACBUILD_UI_PORT: String(PORT), MACBUILD_SETUP_DEMO: '1', DEMO_BUILD_SECONDS: '12' } });
 const server = spawn(process.execPath, [join(HERE, '..', 'server.mjs')], {
   stdio: 'inherit',
   env: {
-    ...process.env, HOME, PATH: `${BIN}:${process.env.PATH}`, MACBUILD_UI_PORT: String(PORT), MACBUILD_BIN: join(BIN, 'macbuild'),
-    MACBUILD_DATA: DATA, MACBUILD_PROJECTS: join(DIR, 'projects.conf'), MACBUILD_CONFIG: join(DIR, 'ui.json'), MACBUILD_APPLE_TEAM: 'T3AM1D2345',
-    DEMO_BUILD_SECONDS: process.env.DEMO_BUILD_SECONDS ?? '600',
-    FAKE_AGENT_DELAY: process.env.FAKE_AGENT_DELAY ?? '420', FAKE_AGENT_EXTRA: join(HOME, 'clients/fieldnotes'), MACBUILD_NO_TERMINAL: '1',
+    ...ENV, MACBUILD_UI_PORT: String(INNER), MACBUILD_APPLE_TEAM: 'T3AM1D2345', DEMO_BUILD_SECONDS: process.env.DEMO_BUILD_SECONDS ?? '600',
   },
 });
 const post = (body) => fetch(`http://127.0.0.1:${PORT}/api/builds`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify(body) });
@@ -371,5 +416,6 @@ await post({ project: 'notes', profile: 'development', ref: 'feature/folders', l
 await new Promise((resolve) => { setTimeout(resolve, 1100); });
 await post({ project: 'pulse', profile: 'production', platform: 'android', ref: 'main', label: 'main', submit: true });
 console.log(`macbuild demo: http://localhost:${PORT}  (data in ${DIR})`);
-const stop = () => { server.kill(); process.exit(0); };
+console.log(`terminal setup: http://localhost:${PORT + 1}`);
+const stop = () => { terminal.stop(); server.kill(); process.exit(0); };
 process.on('SIGINT', stop); process.on('SIGTERM', stop);

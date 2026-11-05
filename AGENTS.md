@@ -73,7 +73,7 @@ Wait for a dashboard job with `macbuild wait`. Inspect with `macbuild builds`, `
 - `lib/setup.mjs` is the guided setup: seven steps, each a screen of fields, commands and buttons, saved in `~/.config/macbuild/setup.json`. `lib/setup-cli.mjs` draws the screens in the terminal with `lib/tui.mjs` (no dependencies); the dashboard's `#/setup` draws the same screens from `/api/setup/flow`. Change a step in `lib/setup.mjs` and both follow.
 - The agent (Claude Code or Codex, `lib/setup-agent.mjs`) is read-only: Claude Code with only Read, Glob and Grep, Codex with `--sandbox read-only`. Its instructions are `skills/macbuild-setup/SKILL.md`, and every answer is checked against `SCHEMA` and `sanitizeReview` before the user sees it. macbuild applies a fix only from `applyAction`'s list, after the user ticks it. A new kind of fix needs all three: the skill's table, `ACTION_TYPES`/`sanitizeReview`, and `applyAction`.
 - Signing is never automated: it's `eas credentials:configure-build` in a terminal, where the user signs in to Apple. The dashboard's Open Terminal runs only commands the current screen lists, and `MACBUILD_NO_TERMINAL=1` (the demo and tests) turns it off.
-- `ui/demo/fake-agent.mjs` stands in for both agents in the demo and the tests. `test/drive-tty.py` types into the terminal UI through a pseudo-terminal.
+- `ui/demo/fake-agent.mjs` stands in for both agents in the demo and the tests. `test/drive-tty.py` types into the terminal UI through a pseudo-terminal. The demo also serves the real terminal setup in a browser on its port + 1 (`ui/demo/terminal.mjs`, with `pty-bridge.py`); `MACBUILD_SETUP_DEMO=1` there means nothing gets installed for real.
 
 ### The rest
 

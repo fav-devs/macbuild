@@ -120,7 +120,7 @@ const statusIcon = (status) => `<span class="st ${status}" role="img" aria-label
 const badge = (status, label = STATUS[status][0]) => `<span class="badge ${status}">${esc(label)}</span>`;
 const buildBadge = (build) => badge(build.status, build.action === 'update' && build.status === 'running' ? 'Publishing OTA' : build.status === 'failed' && build.buildCompleted ? 'Build ready · post-build step failed' : undefined);
 const profileTag = (build) => (build.action === 'update' ? `<span class="tag">${icon('radio')}OTA · ${esc(build.channel)}</span>` : submits(build) ? `<span class="tag store">${icon('send')}${storeName(build.platform)}</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
-const platformTag = (build) => (build.platform === 'android' ? '<span class="tag">Android</span>' : build.simulator ? '<span class="tag">Simulator</span>' : '');
+const platformTag = (build) => (build.platform === 'android' ? '<span class="tag">Android</span>' : build.platform === 'all' ? '<span class="tag">iOS + Android</span>' : build.simulator ? '<span class="tag">Simulator</span>' : '');
 
 // Project avatars: the app icon when the server found one in app.json, else a monogram on a gradient from the name.
 const PALETTE = [['#8b8af5', '#5b5bd6'], ['#62b4ff', '#2f6fe0'], ['#48d6ac', '#0f9d79'], ['#ffbd59', '#f07c1d'], ['#ff86ad', '#dd4579'], ['#bf97ff', '#7d4fe0'], ['#6fd6ec', '#1a93b8'], ['#a3abbd', '#5d6577']];
@@ -744,45 +744,153 @@ const EXPO_STATUS = { FINISHED: 'success', ERRORED: 'failed', CANCELED: 'cancell
 const expoIcon = (value) => statusIcon(EXPO_STATUS[value] ?? 'running');
 const expiryOf = (signing) => (signing?.expires ? Math.round((new Date(signing.expires) - Date.now()) / DAY) : null);
 
+// The OTA composer. Self-contained (esc and icon only): test/ui.test.mjs renders it on its own.
 function updateForm(data) {
   const profiles = data.profiles.filter((profile) => profile.channel && !profile.developmentClient);
   if (!profiles.length) return '<p class="hint">Add a channel to a preview or production build profile in eas.json, and configure expo-updates before publishing OTA.</p>';
-  return `<form class="form" id="ota-form">
-    <p>Publish JavaScript and assets to an existing app. Native code, plugins, or dependency changes may need a new store build. Only compatible runtimes receive the update.</p>
-    <label class="field"><span>Destination profile</span><select class="select" name="profile" required><option value="">Choose a profile and channel</option>${profiles.map((profile) => `<option value="${esc(profile.name)}" data-channel="${esc(profile.channel)}" data-environment="${esc(profile.environment || (['production', 'preview', 'development'].includes(profile.channel) ? profile.channel : ''))}">${esc(profile.name)} → ${esc(profile.channel)}</option>`).join('')}</select></label>
-    <label class="field"><span>Channel</span><input class="input" name="channel" readonly required placeholder="Choose a destination profile"></label>
-    <label class="field"><span>Expo environment</span><select class="select" name="environment" required><option value="">Choose environment</option><option value="preview">preview</option><option value="production">production</option><option value="development">development</option></select></label>
-    <label class="field"><span>Pushed source branch</span><select class="select" name="ref" required><option value="">Choose a pushed branch</option>${data.branches.map((branch) => `<option value="${esc(branch.name)}">${esc(branch.name)} · ${esc(branch.short)}</option>`).join('')}</select></label>
-    <label class="field"><span>Platform</span><select class="select" name="platform"><option value="ios">iOS</option><option value="android">Android</option><option value="all">iOS + Android</option></select></label>
-    <label class="field"><span>Update message</span><input class="input" name="message" required maxlength="1000" placeholder="Fix keyboard suggestions"></label>
-    <p class="hint">Publishes a pushed commit, not uncommitted files. The selected build profile supplies app-variant settings; the Expo environment supplies deployment variables.</p>
-    <button class="btn primary" type="submit">${icon('radio')}Publish OTA update</button><p class="hint" id="ota-error" role="alert"></p>
+  const envOf = (profile) => profile.environment || (['production', 'preview', 'development'].includes(profile.channel) ? profile.channel : '');
+  const main = (data.branches ?? []).find((branch) => ['main', 'master'].includes(branch.name))?.name ?? '';
+  return `<form class="ota" id="ota-form" novalidate>
+    <div class="ota-intro">${icon('radio')}<p>Ships JavaScript and assets to apps people already have. It can’t change native code: a new package with native code, a config plugin or an SDK upgrade needs a new build. Only installs with a compatible runtime receive it.</p></div>
+    <fieldset class="ota-step"><legend><i>1</i>Channel</legend>
+      <div class="ota-channels">${profiles.map((profile) => `<label class="ota-choice">
+        <input type="radio" name="profile" value="${esc(profile.name)}" data-channel="${esc(profile.channel)}" data-environment="${esc(envOf(profile))}" required>
+        <span class="ota-choice-body"><span class="ota-choice-name"><b>${esc(profile.channel)}</b>${profile.channel === 'production' ? `<span class="ota-live">${icon('user', 'xs')}Users</span>` : ''}</span><small data-last="${esc(profile.channel)}">${profile.name === profile.channel ? `${esc(profile.name)} profile` : `profile ${esc(profile.name)}`}</small></span>
+      </label>`).join('')}</div>
+      <input type="hidden" name="channel" required>
+    </fieldset>
+    <fieldset class="ota-step"><legend><i>2</i>Source</legend>
+      <label class="ota-row"><span>Pushed branch</span><select class="select" name="ref" required><option value="">Choose a pushed branch</option>${(data.branches ?? []).map((branch) => `<option value="${esc(branch.name)}"${branch.name === main ? ' selected' : ''}>${esc(branch.name)} · ${esc(branch.short)}</option>`).join('')}</select></label>
+      <div class="ota-commit" id="ota-commit" aria-live="polite"></div>
+      <p class="hint">Publishes the commit on GitHub, not uncommitted files on this Mac.</p>
+    </fieldset>
+    <fieldset class="ota-step"><legend><i>3</i>Platforms and environment</legend>
+      <div class="ota-pair">
+        <div class="seg ota-platforms" role="radiogroup" aria-label="Platforms">${[['ios', 'iOS'], ['android', 'Android'], ['all', 'Both']].map(([value, label]) => `<label><input type="radio" name="platform" value="${value}"${value === 'ios' ? ' checked' : ''}><span>${label}</span></label>`).join('')}</div>
+        <label class="ota-row compact"><span>Expo environment</span><select class="select" name="environment" required><option value="">Choose</option><option value="production">production</option><option value="preview">preview</option><option value="development">development</option></select></label>
+      </div>
+      <p class="hint">The build profile sets the app variant; the environment supplies EXPO_PUBLIC variables from Expo.</p>
+    </fieldset>
+    <fieldset class="ota-step"><legend><i>4</i>Message</legend>
+      <textarea class="input ota-message" name="message" required maxlength="1000" rows="2" placeholder="Fix keyboard suggestions"></textarea>
+      <p class="hint">Shown on Expo next to the update. Filled in from the commit; change it to say what users get.</p>
+    </fieldset>
+    <div class="ota-foot">
+      <p class="ota-summary" id="ota-summary">Choose a channel to publish to.</p>
+      <button class="btn primary" type="submit" id="ota-review">Review</button>
+    </div>
+    <div class="ota-confirm" id="ota-confirm" hidden></div>
+    <p class="hint bad" id="ota-error" role="alert"></p>
   </form>`;
 }
 const PROJECT_SECTIONS = {
   async updates(data, box) {
     const updates = data.builds.filter((build) => build.action === 'update');
-    box.innerHTML = `<div class="cols main-side"><section class="card"><div class="card-head"><h2>Push an OTA update</h2></div><div class="card-body">${updateForm(data)}</div></section><section class="card"><div class="card-head"><h2>OTA history</h2></div>${updates.length ? `<div class="rows">${updates.map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('radio', 'No OTA updates yet')}</section></div>`;
-    const form = $('#ota-form');
-    if (!form) return;
-    form.elements.profile.onchange = () => {
-      const option = form.elements.profile.selectedOptions[0];
-      form.elements.channel.value = option.dataset.channel || '';
-      form.elements.environment.value = option.dataset.environment || '';
+    const profiles = data.profiles.filter((profile) => profile.channel && !profile.developmentClient);
+    const channels = [...new Set(profiles.map((profile) => profile.channel))];
+    // What each channel holds: the newest update from this Mac, and the newest build that listens to it.
+    const channelCard = (name, expo) => {
+      const last = updates.find((build) => build.channel === name);
+      const installed = data.builds.find((build) => build.action !== 'update' && build.status === 'success' && build.channel === name);
+      const remote = expo?.channels.find((item) => item.name === name);
+      const count = remote ? remote.branches.reduce((sum, branch) => sum + branch.updates, 0) : null;
+      return `<button type="button" class="ota-chan" data-pick="${esc(name)}">
+        <span class="ota-chan-head"><b>${esc(name)}</b>${remote?.paused ? '<span class="tag warn">paused</span>' : last && last.status === 'success' ? '<span class="tag store">live</span>' : ''}${count !== null ? `<span class="faint">${plural(count, 'update')} on Expo</span>` : ''}</span>
+        <span class="ota-chan-line">${icon('radio', 'xs')}${last ? `<span class="trunc">${esc(subject(last))}</span><span class="faint">${ago(last.createdAt)}</span>` : '<span class="faint">No update from this Mac yet</span>'}</span>
+        <span class="ota-chan-line">${icon('phone', 'xs')}${installed ? `<span class="trunc">${esc(installed.app?.version ? `${installed.app.version} (${installed.app.number})` : installed.profile)} build${installed.runtime && !installed.runtime.startsWith('file:') ? ` · runtime <span class="mono">${esc(installed.runtime.slice(0, 10))}</span>` : ''}</span><span class="faint">${ago(installed.createdAt)}</span>` : '<span class="faint">No build here listens to it yet</span>'}</span>
+      </button>`;
     };
-    form.onsubmit = async (event) => {
+    const filter = prefs.otaChannel && channels.includes(prefs.otaChannel) ? prefs.otaChannel : 'all';
+    const shown = updates.filter((build) => filter === 'all' || build.channel === filter);
+    box.innerHTML = `<div class="cols main-side ota-page">
+      <section class="card"><div class="card-head"><h2>${icon('radio')}Publish an update</h2></div><div class="card-body">${updateForm(data)}</div></section>
+      <div class="ota-side">
+        <section class="card"><div class="card-head"><h2>${icon('layers')}Channels</h2></div><div class="ota-chans" id="ota-chans">${channels.map((name) => channelCard(name, null)).join('') || '<p class="hint" style="padding:16px">No channels in eas.json yet.</p>'}</div></section>
+      </div>
+    </div>
+    <section class="card" style="margin-top:16px"><div class="card-head"><h2>${icon('clock')}History</h2>${channels.length > 1 ? `<div class="seg" role="tablist">${['all', ...channels].map((name) => `<button type="button" data-ota-filter="${esc(name)}" class="${filter === name ? 'on' : ''}">${name === 'all' ? 'All' : esc(name)}<span class="count">${(name === 'all' ? updates : updates.filter((build) => build.channel === name)).length}</span></button>`).join('')}</div>` : ''}</div>
+      ${shown.length ? `<div class="rows">${shown.map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('radio', filter === 'all' ? 'No OTA updates yet' : `No updates on ${esc(filter)} yet`, 'Updates you publish from here show up with their commit, channel and status.')}
+    </section>`;
+    const chans = $('#ota-chans');
+    expoOf(data.name).then((expo) => { if (chans?.isConnected) chans.innerHTML = channels.map((name) => channelCard(name, expo)).join(''); }).catch(() => {});
+    const form = $('#ota-form');
+    app.onclick = (event) => {
+      const pick = event.target.closest('[data-pick]');
+      const filterButton = event.target.closest('[data-ota-filter]');
+      if (filterButton) { prefs.otaChannel = filterButton.dataset.otaFilter; PROJECT_SECTIONS.updates(data, box); return; }
+      if (pick && form) {
+        const input = [...form.elements.profile].find((item) => item.dataset.channel === pick.dataset.pick);
+        if (input) { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); form.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }
+    };
+    if (!form) return;
+    const confirmBox = $('#ota-confirm');
+    form.querySelectorAll('[data-last]').forEach((line) => {
+      const last = updates.find((build) => build.channel === line.dataset.last && build.status === 'success');
+      if (last) line.textContent = `Now: ${subject(last)} · ${ago(last.createdAt)}`;
+    });
+    let autoMessage = '';
+    const branchOf = () => data.branches.find((branch) => branch.name === form.elements.ref.value);
+    const chosen = () => form.querySelector('input[name="profile"]:checked');
+    const platformName = (value) => ({ ios: 'iOS', android: 'Android', all: 'iOS and Android' })[value] ?? value;
+    const sync = () => {
+      const profile = chosen();
+      const branch = branchOf();
+      form.elements.channel.value = profile?.dataset.channel ?? '';
+      $('#ota-commit').innerHTML = branch
+        ? `<span class="mono">${esc(branch.short)}</span><span class="trunc"><b>${esc(branch.subject ?? '')}</b></span><span class="faint">${esc(branch.author ?? '')}${branch.date ? ` · ${ago(branch.date)}` : ''}</span>${branch.pr ? `<span class="tag">${icon('pr', 'xs')}#${branch.pr.number}</span>` : ''}`
+        : '';
+      // The commit's subject is a good first message; once someone edits it, it stays theirs.
+      const message = form.elements.message;
+      if (branch && (!message.value || message.value === autoMessage)) { autoMessage = branch.subject ?? ''; message.value = autoMessage; }
+      const platform = form.elements.platform.value;
+      $('#ota-summary').innerHTML = profile
+        ? `To <b>${esc(profile.dataset.channel)}</b> · ${esc(platformName(platform))}${branch ? ` · <span class="mono">${esc(branch.name)}@${esc(branch.short)}</span>` : ''}`
+        : 'Choose a channel to publish to.';
+      $('#ota-review').textContent = profile ? `Review update to ${profile.dataset.channel}` : 'Review';
+      const steps = form.querySelectorAll('.ota-step');
+      [Boolean(profile), Boolean(branch), Boolean(form.elements.environment.value), Boolean(message.value.trim())].forEach((done, index) => { steps[index]?.toggleAttribute('data-done', done); });
+      confirmBox.hidden = true;
+      $('#ota-review').hidden = false;
+      $('#ota-error').textContent = '';
+    };
+    form.addEventListener('change', (event) => {
+      if (event.target.name === 'profile') form.elements.environment.value = event.target.dataset.environment || form.elements.environment.value;
+      sync();
+    });
+    form.elements.message.addEventListener('input', () => { confirmBox.hidden = true; $('#ota-review').hidden = false; form.querySelectorAll('.ota-step')[3]?.toggleAttribute('data-done', Boolean(form.elements.message.value.trim())); });
+    sync();
+    form.onsubmit = (event) => {
       event.preventDefault();
+      const profile = chosen();
+      if (!profile) { $('#ota-error').textContent = 'Choose a channel.'; return; }
       if (!form.reportValidity()) return;
       const values = Object.fromEntries(new FormData(form));
-      if (!confirm(`Publish OTA for ${data.name}?\nChannel: ${values.channel}\nEnvironment: ${values.environment}\nPlatform: ${values.platform}\nPushed branch: ${values.ref}\nMessage: ${values.message}\n\nCompatible installed apps may receive this update.`)) return;
-      const button = form.querySelector('button[type="submit"]');
-      button.disabled = true;
-      try {
-        const result = await post(`/api/projects/${encodeURIComponent(data.name)}/updates`, values);
-        if (result.error) $('#ota-error').textContent = result.error;
-        else location.hash = `#/build/${result.id}`;
-      } catch (error) { $('#ota-error').textContent = error.message; }
-      finally { button.disabled = false; }
+      const branch = branchOf();
+      const production = values.channel === 'production';
+      // Publishing reaches people's phones, so it takes a second, deliberate click.
+      confirmBox.innerHTML = `<div class="ota-confirm-head">${icon(production ? 'alert' : 'radio')}<b>Publish to ${esc(values.channel)}?</b></div>
+        <dl class="ota-confirm-list">
+          <div><dt>Ships</dt><dd><span class="mono">${esc(values.ref)}@${esc(branch?.short ?? '')}</span> ${esc(branch?.subject ?? '')}</dd></div>
+          <div><dt>To</dt><dd>${esc(platformName(values.platform))} installs on <b>${esc(values.channel)}</b>, profile ${esc(values.profile)}, environment ${esc(values.environment)}</dd></div>
+          <div><dt>Message</dt><dd>${esc(values.message)}</dd></div>
+        </dl>
+        <p class="hint">${production ? 'People using the app get it the next time they open it. ' : ''}Only installs with a compatible runtime receive it. A later update can replace it, but it can’t be taken back from phones that already have it.</p>
+        <div class="ota-confirm-do"><button type="button" class="btn ghost" data-ota-back>Back</button><button type="button" class="btn ${production ? 'danger-fill' : 'primary'}" data-ota-publish>${icon('radio')}Publish to ${esc(values.channel)}</button></div>`;
+      confirmBox.hidden = false;
+      $('#ota-review').hidden = true; // one way to publish at a time: the confirmation's own button
+      confirmBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      confirmBox.querySelector('[data-ota-back]').onclick = () => { confirmBox.hidden = true; $('#ota-review').hidden = false; };
+      confirmBox.querySelector('[data-ota-publish]').onclick = async (click) => {
+        const button = click.currentTarget;
+        button.disabled = true;
+        try {
+          const result = await post(`/api/projects/${encodeURIComponent(data.name)}/updates`, values);
+          if (result.error) { $('#ota-error').textContent = result.error; confirmBox.hidden = true; }
+          else location.hash = `#/build/${result.id}`;
+        } catch (error) { $('#ota-error').textContent = error.message; }
+        finally { button.disabled = false; }
+      };
     };
     if (updates.some(active)) every(3000, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(data.name)}`); if (!fresh.builds.filter((build) => build.action === 'update').some(active)) { route(); return 'stop'; } return undefined; });
   },

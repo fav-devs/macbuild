@@ -1,5 +1,5 @@
 // App shell and last-seen data for offline use; IPAs and install files always go to the network.
-const CACHE = 'macbuild-v6';
+const CACHE = 'macbuild-v7';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/apple-touch-icon.png'];
 self.addEventListener('install', (event) => { event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', (event) => {

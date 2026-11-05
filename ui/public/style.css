@@ -588,3 +588,74 @@ body.focus main { max-width: 700px; padding: calc(env(safe-area-inset-top) + 18p
 .wz-cmd code { overflow: hidden; color: var(--text); font: 13px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
 .wz-cmd span { flex: 1; color: var(--text-3); font-size: 12.5px; text-align: right; }
 @media (max-width: 719px) { .wz-cmd { flex-wrap: wrap; row-gap: 2px; } .wz-cmd code { flex: 1; } .wz-cmd span { order: 3; width: 100%; text-align: left; } }
+
+/* OTA updates: a composer in four steps, what each channel holds beside it, and the history below. */
+.ota { display: grid; gap: 22px; }
+.ota-intro { display: flex; gap: 10px; padding: 12px 14px; border-radius: 10px; background: var(--sunken); color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.ota-intro .i { flex: none; margin-top: 1px; color: var(--accent); }
+.ota-intro p { margin: 0; }
+.ota-step { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.ota-step legend { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 0; font-size: 13.5px; font-weight: 650; }
+.ota-step legend i { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line-2); color: var(--text-2); font: 650 11px var(--font); font-style: normal; }
+.ota-step[data-done] legend i { background: var(--text); box-shadow: none; color: var(--bg); }
+.ota-step .hint { margin: 0; }
+.ota-channels { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.ota-choice { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; transition: border-color .12s, background .12s, box-shadow .12s; }
+.ota-choice:hover { border-color: var(--line-2); }
+.ota-choice input { position: absolute; opacity: 0; pointer-events: none; }
+.ota-choice:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: color-mix(in srgb, var(--accent) 5%, var(--surface)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
+.ota-choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ota-choice-body { display: grid; gap: 2px; min-width: 0; }
+.ota-choice-name { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ota-choice-body b { font: 600 14px var(--mono); }
+.ota-choice-body small { overflow: hidden; color: var(--text-3); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.ota-choice-body { flex: 1; }
+.ota-live { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 20px; padding: 0 7px; border-radius: 99px; background: color-mix(in srgb, var(--amber) 12%, transparent); color: var(--amber); font-size: 11px; font-weight: 650; }
+.ota-live .i { width: 11px; height: 11px; }
+.ota-row { display: grid; gap: 6px; min-width: 0; }
+.ota-row > span { color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+.ota-commit { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 9px 12px; border-radius: 8px; background: var(--sunken); font-size: 13px; }
+.ota-commit:empty { display: none; }
+.ota-commit .trunc { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ota-commit .faint { flex: none; font-size: 12px; }
+@media (max-width: 719px) { .ota-commit { flex-wrap: wrap; } .ota-commit .trunc { flex-basis: 100%; order: 3; } }
+.ota-pair { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; }
+.ota-pair .ota-row { flex: 1; min-width: 180px; }
+.ota-platforms { align-self: flex-end; }
+.ota-platforms label { position: relative; }
+.ota-platforms input { position: absolute; opacity: 0; pointer-events: none; }
+.ota-platforms span { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 7px; color: var(--text-2); font-size: 13px; font-weight: 600; cursor: pointer; }
+.ota-platforms input:checked + span { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .08), inset 0 0 0 1px var(--line); }
+.ota-platforms input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.input.ota-message { height: auto; min-height: 64px; padding: 9px 11px; resize: vertical; font: inherit; line-height: 1.45; }
+.ota-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-top: 16px; border-top: 1px solid var(--line); }
+.ota-summary { min-width: 0; margin: 0; color: var(--text-2); font-size: 13px; }
+.ota-summary b { color: var(--text); }
+@media (max-width: 719px) { .ota-foot .btn { width: 100%; } }
+.ota-confirm { display: grid; gap: 12px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 5%, var(--surface)); animation: rise .18s ease-out; }
+.ota-confirm-head { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.ota-confirm-head .i { color: var(--accent); }
+.ota-confirm:has(.danger-fill) { border-color: color-mix(in srgb, var(--amber) 40%, var(--line)); background: color-mix(in srgb, var(--amber) 6%, var(--surface)); }
+.ota-confirm:has(.danger-fill) .ota-confirm-head .i { color: var(--amber); }
+.ota-confirm-list { display: grid; gap: 8px; margin: 0; }
+.ota-confirm-list div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; font-size: 13.5px; }
+.ota-confirm-list dt { color: var(--text-3); font-size: 12.5px; }
+.ota-confirm-list dd { margin: 0; overflow-wrap: anywhere; }
+.ota-confirm .hint { margin: 0; }
+.ota-confirm-do { display: flex; justify-content: flex-end; gap: 8px; }
+.btn.danger-fill { background: var(--red); border-color: var(--red); color: #fff; }
+.btn.danger-fill:hover { opacity: .9; background: var(--red); }
+.hint.bad { color: var(--red); }
+.hint.bad:empty { display: none; }
+.ota-chans { display: grid; }
+.ota-chan { display: grid; gap: 7px; width: 100%; padding: 14px 16px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ota-chan + .ota-chan { border-top: 1px solid var(--line); }
+.ota-chan:hover { background: var(--hover); }
+.ota-chan:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ota-chan-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ota-chan-head b { font: 600 13.5px var(--mono); }
+.ota-chan-head .faint { margin-left: auto; font-size: 12px; }
+.ota-chan-line { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-2); font-size: 12.5px; }
+.ota-chan-line .i { flex: none; color: var(--text-3); }
+.ota-chan-line .trunc { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ota-chan-line .faint { flex: none; }

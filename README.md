@@ -320,6 +320,7 @@ Running CLI jobs parse their full script before starting, so editing `bin/macbui
 git clone https://github.com/fav-devs/macbuild.git && cd macbuild
 npm ci --prefix ui
 node ui/demo/demo.mjs        # the dashboard with sample projects and a build running, at http://localhost:4181 (setup: #/setup)
+                             # and the terminal setup in a browser, at http://localhost:4182
 node --test test/*.test.mjs  # tests for the CLI and the web UI's server
 ```
 
