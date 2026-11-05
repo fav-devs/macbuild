@@ -659,3 +659,15 @@ body.focus main { max-width: 700px; padding: calc(env(safe-area-inset-top) + 18p
 .ota-chan-line .i { flex: none; color: var(--text-3); }
 .ota-chan-line .trunc { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ota-chan-line .faint { flex: none; }
+
+.wz-qr { display: flex; align-items: center; gap: 20px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--sunken); }
+.wz-qr-code { flex: none; width: 148px; padding: 8px; border-radius: 10px; background: #fff; line-height: 0; }
+.wz-qr-code svg { width: 100%; height: auto; }
+.wz-qr-text { display: grid; gap: 6px; min-width: 0; }
+.wz-qr-text b { font-size: 14.5px; }
+.wz-qr-text p { margin: 0; color: var(--text-2); font-size: 13px; }
+.wz-qr-text .wz-cmd { padding: 6px 6px 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+@media (max-width: 719px) { .wz-qr { flex-direction: column; align-items: stretch; text-align: center; } .wz-qr-code { align-self: center; } }
+.wz-qr, .wz-qr-text, .wz-cmd code { min-width: 0; } /* a long link truncates instead of widening the card */
+.wz-qr-text { grid-template-columns: minmax(0, 1fr); }
+.wz-cmd { min-width: 0; }

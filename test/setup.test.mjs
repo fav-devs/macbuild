@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  SetupFlow, applyAction, checkApp, describeAction, nameApps, ownReview, quickScan, readApp, readProjects, sanitizeFound, sanitizeReview, writeSetting,
+  SetupFlow, applyAction, checkApp, describeAction, detectTailscale, nameApps, ownReview, quickScan, readApp, readProjects, sanitizeFound, sanitizeReview, writeSetting,
 } from '../lib/setup.mjs';
 import { lastJson, runAgent, toolActivity } from '../lib/setup-agent.mjs';
 
@@ -49,7 +49,7 @@ function home({ agents = ['claude'] } = {}) {
 const DOCTOR = { ok: true, items: [{ id: 'xcode', label: 'Xcode', status: 'ok', detail: 'Xcode 26.1' }, { id: 'expo-login', label: 'Expo login', status: 'ok', detail: 'acme' }, { id: 'cocoapods', label: 'CocoaPods', status: 'miss', detail: 'brew install cocoapods' }] };
 function flowFor(dir, env, hooks = {}) {
   Object.assign(process.env, { PATH: env.PATH, FAKE_AGENT_DELAY: '5', FAKE_AGENT_EXTRA: env.FAKE_AGENT_EXTRA, FAKE_AGENT_LOG: env.FAKE_AGENT_LOG });
-  return new SetupFlow({ home: dir, hooks: { doctor: async () => DOCTOR, devices: async () => [], ...hooks } });
+  return new SetupFlow({ home: dir, hooks: { doctor: async () => DOCTOR, devices: async () => [], tailscale: async () => ({ installed: false }), ...hooks } });
 }
 async function settled(flow) { let view = await flow.view(); while (view.busy) { await flow.wait(); view = await flow.view(); } return view; }
 const values = (view) => Object.fromEntries(view.fields.map((field) => [field.id, field.value]));
@@ -212,6 +212,9 @@ test('setup with an agent: finds apps, adds the chosen ones, fixes them, records
   await flow.submit({ step: 'mac', values: { appleId: 'me@example.com', dashboard: false } });
   assert.match(readFileSync(join(dir, '.config/macbuild/env'), 'utf8'), /^MACBUILD_APPLE_ID=me@example.com$/m);
   view = await flow.view();
+  assert.equal(view.step, 'phone');
+  await flow.submit({ step: 'phone', button: 'continue' });
+  view = await flow.view();
   assert.equal(view.step, 'build');
   await flow.submit({ step: 'build', button: 'build', values: { app: 'notes' } });
   assert.deepEqual(started, [{ app: 'notes', profile: 'development', install: false }]);
@@ -265,6 +268,8 @@ test('the terminal setup walks every step with the keyboard, and running it agai
       ['Run which now', '\r'],
       ['Run the dashboard at login', 'n\r'],
       ['Apple ID', '\r'],
+      ['Use macbuild from your phone.*Run it now', '\r'],
+      ['What next', '\u001b[B\r'], // Not now
       ['Build which app', '\r'],
       ['What next', '\u001b[B\r'],
       ['You.re set up', ''],
@@ -333,6 +338,49 @@ test('the dashboard serves the same steps at /api/setup/flow, and opens Terminal
     assert.equal(known.json.line, `cd ${dir} && brew install cocoapods`);
     assert.equal((await request(port, '/api/setup')).json.flow.step, 'tools');
   } finally { server.kill(); }
+});
+
+test('the Phone step walks through Tailscale: install, sign in, publish, then the link and its QR code', async () => {
+  const { dir, env } = home();
+  let state = { installed: false };
+  const flow = flowFor(dir, env, { tailscale: async () => state });
+  flow.state.step = 'phone'; flow.save();
+  let view = await flow.view();
+  assert.equal(view.title, 'Use macbuild from your phone');
+  assert.deepEqual(view.commands.map((command) => command.display), ['brew install --cask tailscale']);
+  assert.ok(view.commands.every((command) => command.optional), 'skipping the phone is fine');
+  state = { installed: true, bin: '/usr/bin/tailscale', daemon: true, needsLogin: true, online: false, port: '4180', httpsPort: '8443' };
+  await flow.submit({ step: 'phone', button: 'recheck' });
+  view = await flow.view();
+  assert.equal(view.title, 'Sign in to Tailscale');
+  assert.equal(view.commands[0].display, '/usr/bin/tailscale up');
+  state = { ...state, needsLogin: false, online: true, host: 'mac.tail1.ts.net', serving: false, url: 'https://mac.tail1.ts.net:8443' };
+  await flow.submit({ step: 'phone', button: 'recheck' });
+  view = await flow.view();
+  assert.equal(view.commands[0].display, '/usr/bin/tailscale serve --bg --https=8443 http://127.0.0.1:4180');
+  state = { ...state, serving: true };
+  flow.mark(view.commands[0].id, 0); // running a command looks again
+  view = await flow.view();
+  assert.equal(view.title, 'Your phone is ready');
+  assert.deepEqual(view.qr, { url: 'https://mac.tail1.ts.net:8443' });
+  await flow.submit({ step: 'phone', button: 'continue' });
+  assert.equal((await flow.view()).step, 'build');
+
+  // Detection itself, against a stand-in for the tailscale CLI.
+  const ts = join(dir, 'bin/ts');
+  writeFileSync(ts, `#!/bin/sh\ncase "$1 $2" in\n  "status --json") echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"mac.tail1.ts.net."}}';;\n  "serve status") echo "|-- / proxy http://127.0.0.1:4555";;\nesac\n`, { mode: 0o755 });
+  const saved = { ...process.env };
+  Object.assign(process.env, { MACBUILD_TAILSCALE: ts, MACBUILD_UI_PORT: '4555', MACBUILD_UI_HTTPS_PORT: '9443' });
+  try {
+    const found = await detectTailscale({ home: dir });
+    assert.equal(found.online, true);
+    assert.equal(found.serving, true);
+    assert.equal(found.url, 'https://mac.tail1.ts.net:9443');
+    process.env.MACBUILD_TAILSCALE = '';
+    assert.equal((await detectTailscale({ home: dir })).installed, false);
+  } finally {
+    for (const key of ['MACBUILD_TAILSCALE', 'MACBUILD_UI_PORT', 'MACBUILD_UI_HTTPS_PORT']) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
+  }
 });
 
 test('describing a fix never needs the agent’s words', () => {

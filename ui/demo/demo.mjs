@@ -303,6 +303,14 @@ script('du', `case "$2" in
   *) exec "$(PATH=\${PATH#*:} command -v du)" "$@";;
 esac
 `);
+// Tailscale, signed in, with the dashboard on the tailnet: setup's Phone step shows the link and its QR code. The demo
+// names it in MACBUILD_TAILSCALE, so it never touches the Tailscale on this Mac.
+script('tailscale', `case "$1 $2" in
+  "status --json") echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"studio-mac.tail4f2a.ts.net."}}';;
+  "serve status") echo "https://studio-mac.tail4f2a.ts.net:8443 (tailnet only)"; echo "|-- / proxy http://127.0.0.1:\${MACBUILD_UI_PORT:-4180}";;
+  *) exit 0;;
+esac
+`);
 // A paired iPhone, for setup's "install builds on which iPhone?".
 script('xcrun', `[ "$1 $2 $3" = "devicectl list devices" ] || exit 1
 out=""; while [ $# -gt 0 ]; do [ "$1" = --json-output ] && out=$2; shift; done
@@ -391,6 +399,7 @@ const ENV = {
   ...process.env, HOME, PATH: `${BIN}:${process.env.PATH}`, MACBUILD_BIN: join(BIN, 'macbuild'),
   MACBUILD_DATA: DATA, MACBUILD_PROJECTS: join(DIR, 'projects.conf'), MACBUILD_CONFIG: join(DIR, 'ui.json'),
   FAKE_AGENT_DELAY: process.env.FAKE_AGENT_DELAY ?? '420', FAKE_AGENT_EXTRA: join(HOME, 'clients/fieldnotes'), MACBUILD_NO_TERMINAL: '1',
+  MACBUILD_TAILSCALE: join(BIN, 'tailscale'),
 };
 createServer((req, res) => {
   const upstream = httpRequest({ host: '127.0.0.1', port: INNER, path: req.url, method: req.method, headers: { ...req.headers, host: `127.0.0.1:${INNER}` } }, (reply) => {

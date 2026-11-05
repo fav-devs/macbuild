@@ -1377,6 +1377,7 @@ function setupCard(view) {
       ? `<figure class="wz-agent"><figcaption>${icon('sparkle')}${esc(view.by)}</figcaption><blockquote>${esc(view.lead)}</blockquote></figure>`
       : `<p class="wz-lead">${esc(view.lead)}</p>`) : ''}
     ${view.busy ? setupBusy(view.busy) : ''}
+    ${view.qr ? `<div class="wz-qr">${view.qrSvg ? `<div class="wz-qr-code" role="img" aria-label="QR code for ${esc(view.qr.url)}">${view.qrSvg}</div>` : ''}<div class="wz-qr-text"><b>Scan with your iPhone’s camera</b><p>or open this link in Safari:</p><div class="wz-cmd"><code>${esc(view.qr.url)}</code><button type="button" class="btn ghost sm" data-copy="${esc(view.qr.url)}" aria-label="Copy the link">${icon('copy')}</button></div></div></div>` : ''}
     <div class="wz-live">${setupNotes(view.notes)}</div>
     ${main.map((field) => setupField(field, attached(field))).join('')}
     <div class="wz-live-commands">${setupCommands(view.commands)}</div>

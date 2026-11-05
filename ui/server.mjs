@@ -550,6 +550,8 @@ const setupFlow = new SetupFlow({
       : ({ app, profile, install }) => enqueue({ project: app, profile, platform: 'ios', install, trigger: 'manual', by: 'setup' }),
   },
 });
+// The phone step shows its link as a QR code too, drawn here where the qrcode package is.
+const withQr = async (view) => (view?.qr?.url ? { ...view, qrSvg: await QRCode.toString(view.qr.url, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' }) } : view);
 const appleString = (text) => `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 async function setupTerminal(req, res) {
   const { id } = await body(req);
@@ -1203,12 +1205,12 @@ async function api(req, res, url) {
   if (url.pathname === '/api/system' && req.method === 'GET') return json(res, 200, await system());
   if (url.pathname === '/api/setup' && req.method === 'GET') return json(res, 200, await setupView());
   if (url.pathname === '/api/setup' && req.method === 'POST') return applySetup(req, res);
-  if (url.pathname === '/api/setup/flow' && req.method === 'GET') return json(res, 200, await setupFlow.view());
+  if (url.pathname === '/api/setup/flow' && req.method === 'GET') return json(res, 200, await withQr(await setupFlow.view()));
   if (url.pathname === '/api/setup/flow' && req.method === 'POST') {
     const { step, button, values } = await body(req, 65536);
     const result = await setupFlow.submit({ step, button: typeof button === 'string' ? button : 'continue', values: values && typeof values === 'object' && !Array.isArray(values) ? values : {} });
-    if (result.error) return json(res, 409, { error: result.error, view: await setupFlow.view() });
-    return json(res, 200, await setupFlow.view());
+    if (result.error) return json(res, 409, { error: result.error, view: await withQr(await setupFlow.view()) });
+    return json(res, 200, await withQr(await setupFlow.view()));
   }
   if (url.pathname === '/api/setup/terminal' && req.method === 'POST') return setupTerminal(req, res);
   if (url.pathname === '/api/menubar' && req.method === 'GET') return json(res, 200, menubarView());

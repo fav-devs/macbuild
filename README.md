@@ -32,7 +32,7 @@ You need a Mac with Xcode, Node.js, CocoaPods, fastlane, `eas-cli` (signed in wi
 
 ### First-time setup
 
-In a terminal, the installer ends with the guided setup. It asks whether to carry on in the terminal or in the browser, then walks through seven steps:
+In a terminal, the installer ends with the guided setup. It asks whether to carry on in the terminal or in the browser, then walks through eight steps:
 
 <p>
   <img src="docs/setup-terminal.png" width="49%" alt="Setup in the terminal: Claude Code found four apps, with a checklist to add them">
@@ -45,7 +45,8 @@ In a terminal, the installer ends with the guided setup. It asks whether to carr
 4. **Check.** Anything that would make EAS stop and ask during a build: no bundle identifier, no EAS project, no development profile, no `expo-dev-client`. Each fix is listed for you to approve, with a suggested value you can change. macbuild makes the change, from a fixed list of fixes it knows; the agent never edits anything.
 5. **Signing.** `eas credentials:configure-build` for each app, in a terminal, where you sign in to Apple yourself. macbuild and the agent never see your password.
 6. **This Mac.** The dashboard at login, the iPhone for `--install` and your Apple ID.
-7. **First build.** A development build of the app you pick.
+7. **Phone.** Tailscale, so the dashboard opens on your phone and stays private to your tailnet: install it, sign in, and publish the dashboard with `tailscale serve`. Then a link and a QR code for your iPhone. Skip it to keep the dashboard on the Mac only.
+8. **First build.** A development build of the app you pick.
 
 Without an agent, macbuild's own scan and checks do steps 2 and 4. Setup remembers where you got to, in the terminal and the browser alike.
 

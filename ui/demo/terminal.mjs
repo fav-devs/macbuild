@@ -44,7 +44,8 @@ const PAGE = `<!doctype html>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <script>
-  const term = new Terminal({ fontFamily: '"JetBrains Mono", "SF Mono", Menlo, ui-monospace, monospace', fontSize: innerWidth < 600 ? 11.5 : 13.5, lineHeight: 1.15, cursorBlink: false,
+  // lineHeight 1, so a QR code's half blocks meet.
+  const term = new Terminal({ fontFamily: '"JetBrains Mono", "SF Mono", Menlo, ui-monospace, monospace', fontSize: innerWidth < 600 ? 11.5 : 13.5, lineHeight: 1, cursorBlink: false,
     theme: { background: '#0f0f12', foreground: '#d6d6dc', black: '#0f0f12', green: '#3ccb84', red: '#ff6a6d', yellow: '#f0a83a', brightBlack: '#5f606c' } });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit); term.open(document.getElementById('term')); fit.fit();
