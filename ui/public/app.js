@@ -120,7 +120,7 @@ const statusIcon = (status) => `<span class="st ${status}" role="img" aria-label
 const badge = (status, label = STATUS[status][0]) => `<span class="badge ${status}">${esc(label)}</span>`;
 const buildBadge = (build) => badge(build.status, build.action === 'update' && build.status === 'running' ? 'Publishing OTA' : build.status === 'failed' && build.buildCompleted ? 'Build ready · post-build step failed' : undefined);
 const profileTag = (build) => (build.action === 'update' ? `<span class="tag">${icon('radio')}OTA · ${esc(build.channel)}</span>` : submits(build) ? `<span class="tag store">${icon('send')}${storeName(build.platform)}</span>` : `<span class="tag ${store(build) ? 'store' : ''}">${esc(build.profile)}</span>`);
-const platformTag = (build) => (build.platform === 'android' ? '<span class="tag">Android</span>' : build.simulator ? '<span class="tag">Simulator</span>' : '');
+const platformTag = (build) => (build.platform === 'android' ? '<span class="tag">Android</span>' : build.platform === 'all' ? '<span class="tag">iOS + Android</span>' : build.simulator ? '<span class="tag">Simulator</span>' : '');
 
 // Project avatars: the app icon when the server found one in app.json, else a monogram on a gradient from the name.
 const PALETTE = [['#8b8af5', '#5b5bd6'], ['#62b4ff', '#2f6fe0'], ['#48d6ac', '#0f9d79'], ['#ffbd59', '#f07c1d'], ['#ff86ad', '#dd4579'], ['#bf97ff', '#7d4fe0'], ['#6fd6ec', '#1a93b8'], ['#a3abbd', '#5d6577']];
@@ -132,7 +132,7 @@ function avatar(name, size = '') {
 
 // Server
 const shell = { projects: [], system: null };
-const routing = { token: 0, controller: new AbortController(), timers: [] };
+const routing = { token: 0, controller: new AbortController(), timers: [], first: true };
 async function get(path) {
   const { signal } = routing.controller;
   const response = await fetch(path, { cache: 'no-store', signal });
@@ -744,45 +744,153 @@ const EXPO_STATUS = { FINISHED: 'success', ERRORED: 'failed', CANCELED: 'cancell
 const expoIcon = (value) => statusIcon(EXPO_STATUS[value] ?? 'running');
 const expiryOf = (signing) => (signing?.expires ? Math.round((new Date(signing.expires) - Date.now()) / DAY) : null);
 
+// The OTA composer. Self-contained (esc and icon only): test/ui.test.mjs renders it on its own.
 function updateForm(data) {
   const profiles = data.profiles.filter((profile) => profile.channel && !profile.developmentClient);
   if (!profiles.length) return '<p class="hint">Add a channel to a preview or production build profile in eas.json, and configure expo-updates before publishing OTA.</p>';
-  return `<form class="form" id="ota-form">
-    <p>Publish JavaScript and assets to an existing app. Native code, plugins, or dependency changes may need a new store build. Only compatible runtimes receive the update.</p>
-    <label class="field"><span>Destination profile</span><select class="select" name="profile" required><option value="">Choose a profile and channel</option>${profiles.map((profile) => `<option value="${esc(profile.name)}" data-channel="${esc(profile.channel)}" data-environment="${esc(profile.environment || (['production', 'preview', 'development'].includes(profile.channel) ? profile.channel : ''))}">${esc(profile.name)} → ${esc(profile.channel)}</option>`).join('')}</select></label>
-    <label class="field"><span>Channel</span><input class="input" name="channel" readonly required placeholder="Choose a destination profile"></label>
-    <label class="field"><span>Expo environment</span><select class="select" name="environment" required><option value="">Choose environment</option><option value="preview">preview</option><option value="production">production</option><option value="development">development</option></select></label>
-    <label class="field"><span>Pushed source branch</span><select class="select" name="ref" required><option value="">Choose a pushed branch</option>${data.branches.map((branch) => `<option value="${esc(branch.name)}">${esc(branch.name)} · ${esc(branch.short)}</option>`).join('')}</select></label>
-    <label class="field"><span>Platform</span><select class="select" name="platform"><option value="ios">iOS</option><option value="android">Android</option><option value="all">iOS + Android</option></select></label>
-    <label class="field"><span>Update message</span><input class="input" name="message" required maxlength="1000" placeholder="Fix keyboard suggestions"></label>
-    <p class="hint">Publishes a pushed commit, not uncommitted files. The selected build profile supplies app-variant settings; the Expo environment supplies deployment variables.</p>
-    <button class="btn primary" type="submit">${icon('radio')}Publish OTA update</button><p class="hint" id="ota-error" role="alert"></p>
+  const envOf = (profile) => profile.environment || (['production', 'preview', 'development'].includes(profile.channel) ? profile.channel : '');
+  const main = (data.branches ?? []).find((branch) => ['main', 'master'].includes(branch.name))?.name ?? '';
+  return `<form class="ota" id="ota-form" novalidate>
+    <div class="ota-intro">${icon('radio')}<p>Ships JavaScript and assets to apps people already have. It can’t change native code: a new package with native code, a config plugin or an SDK upgrade needs a new build. Only installs with a compatible runtime receive it.</p></div>
+    <fieldset class="ota-step"><legend><i>1</i>Channel</legend>
+      <div class="ota-channels">${profiles.map((profile) => `<label class="ota-choice">
+        <input type="radio" name="profile" value="${esc(profile.name)}" data-channel="${esc(profile.channel)}" data-environment="${esc(envOf(profile))}" required>
+        <span class="ota-choice-body"><span class="ota-choice-name"><b>${esc(profile.channel)}</b>${profile.channel === 'production' ? `<span class="ota-live">${icon('user', 'xs')}Users</span>` : ''}</span><small data-last="${esc(profile.channel)}">${profile.name === profile.channel ? `${esc(profile.name)} profile` : `profile ${esc(profile.name)}`}</small></span>
+      </label>`).join('')}</div>
+      <input type="hidden" name="channel" required>
+    </fieldset>
+    <fieldset class="ota-step"><legend><i>2</i>Source</legend>
+      <label class="ota-row"><span>Pushed branch</span><select class="select" name="ref" required><option value="">Choose a pushed branch</option>${(data.branches ?? []).map((branch) => `<option value="${esc(branch.name)}"${branch.name === main ? ' selected' : ''}>${esc(branch.name)} · ${esc(branch.short)}</option>`).join('')}</select></label>
+      <div class="ota-commit" id="ota-commit" aria-live="polite"></div>
+      <p class="hint">Publishes the commit on GitHub, not uncommitted files on this Mac.</p>
+    </fieldset>
+    <fieldset class="ota-step"><legend><i>3</i>Platforms and environment</legend>
+      <div class="ota-pair">
+        <div class="seg ota-platforms" role="radiogroup" aria-label="Platforms">${[['ios', 'iOS'], ['android', 'Android'], ['all', 'Both']].map(([value, label]) => `<label><input type="radio" name="platform" value="${value}"${value === 'ios' ? ' checked' : ''}><span>${label}</span></label>`).join('')}</div>
+        <label class="ota-row compact"><span>Expo environment</span><select class="select" name="environment" required><option value="">Choose</option><option value="production">production</option><option value="preview">preview</option><option value="development">development</option></select></label>
+      </div>
+      <p class="hint">The build profile sets the app variant; the environment supplies EXPO_PUBLIC variables from Expo.</p>
+    </fieldset>
+    <fieldset class="ota-step"><legend><i>4</i>Message</legend>
+      <textarea class="input ota-message" name="message" required maxlength="1000" rows="2" placeholder="Fix keyboard suggestions"></textarea>
+      <p class="hint">Shown on Expo next to the update. Filled in from the commit; change it to say what users get.</p>
+    </fieldset>
+    <div class="ota-foot">
+      <p class="ota-summary" id="ota-summary">Choose a channel to publish to.</p>
+      <button class="btn primary" type="submit" id="ota-review">Review</button>
+    </div>
+    <div class="ota-confirm" id="ota-confirm" hidden></div>
+    <p class="hint bad" id="ota-error" role="alert"></p>
   </form>`;
 }
 const PROJECT_SECTIONS = {
   async updates(data, box) {
     const updates = data.builds.filter((build) => build.action === 'update');
-    box.innerHTML = `<div class="cols main-side"><section class="card"><div class="card-head"><h2>Push an OTA update</h2></div><div class="card-body">${updateForm(data)}</div></section><section class="card"><div class="card-head"><h2>OTA history</h2></div>${updates.length ? `<div class="rows">${updates.map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('radio', 'No OTA updates yet')}</section></div>`;
-    const form = $('#ota-form');
-    if (!form) return;
-    form.elements.profile.onchange = () => {
-      const option = form.elements.profile.selectedOptions[0];
-      form.elements.channel.value = option.dataset.channel || '';
-      form.elements.environment.value = option.dataset.environment || '';
+    const profiles = data.profiles.filter((profile) => profile.channel && !profile.developmentClient);
+    const channels = [...new Set(profiles.map((profile) => profile.channel))];
+    // What each channel holds: the newest update from this Mac, and the newest build that listens to it.
+    const channelCard = (name, expo) => {
+      const last = updates.find((build) => build.channel === name);
+      const installed = data.builds.find((build) => build.action !== 'update' && build.status === 'success' && build.channel === name);
+      const remote = expo?.channels.find((item) => item.name === name);
+      const count = remote ? remote.branches.reduce((sum, branch) => sum + branch.updates, 0) : null;
+      return `<button type="button" class="ota-chan" data-pick="${esc(name)}">
+        <span class="ota-chan-head"><b>${esc(name)}</b>${remote?.paused ? '<span class="tag warn">paused</span>' : last && last.status === 'success' ? '<span class="tag store">live</span>' : ''}${count !== null ? `<span class="faint">${plural(count, 'update')} on Expo</span>` : ''}</span>
+        <span class="ota-chan-line">${icon('radio', 'xs')}${last ? `<span class="trunc">${esc(subject(last))}</span><span class="faint">${ago(last.createdAt)}</span>` : '<span class="faint">No update from this Mac yet</span>'}</span>
+        <span class="ota-chan-line">${icon('phone', 'xs')}${installed ? `<span class="trunc">${esc(installed.app?.version ? `${installed.app.version} (${installed.app.number})` : installed.profile)} build${installed.runtime && !installed.runtime.startsWith('file:') ? ` · runtime <span class="mono">${esc(installed.runtime.slice(0, 10))}</span>` : ''}</span><span class="faint">${ago(installed.createdAt)}</span>` : '<span class="faint">No build here listens to it yet</span>'}</span>
+      </button>`;
     };
-    form.onsubmit = async (event) => {
+    const filter = prefs.otaChannel && channels.includes(prefs.otaChannel) ? prefs.otaChannel : 'all';
+    const shown = updates.filter((build) => filter === 'all' || build.channel === filter);
+    box.innerHTML = `<div class="cols main-side ota-page">
+      <section class="card"><div class="card-head"><h2>${icon('radio')}Publish an update</h2></div><div class="card-body">${updateForm(data)}</div></section>
+      <div class="ota-side">
+        <section class="card"><div class="card-head"><h2>${icon('layers')}Channels</h2></div><div class="ota-chans" id="ota-chans">${channels.map((name) => channelCard(name, null)).join('') || '<p class="hint" style="padding:16px">No channels in eas.json yet.</p>'}</div></section>
+      </div>
+    </div>
+    <section class="card" style="margin-top:16px"><div class="card-head"><h2>${icon('clock')}History</h2>${channels.length > 1 ? `<div class="seg" role="tablist">${['all', ...channels].map((name) => `<button type="button" data-ota-filter="${esc(name)}" class="${filter === name ? 'on' : ''}">${name === 'all' ? 'All' : esc(name)}<span class="count">${(name === 'all' ? updates : updates.filter((build) => build.channel === name)).length}</span></button>`).join('')}</div>` : ''}</div>
+      ${shown.length ? `<div class="rows">${shown.map((build) => buildRow(build, { project: false })).join('')}</div>` : empty('radio', filter === 'all' ? 'No OTA updates yet' : `No updates on ${esc(filter)} yet`, 'Updates you publish from here show up with their commit, channel and status.')}
+    </section>`;
+    const chans = $('#ota-chans');
+    expoOf(data.name).then((expo) => { if (chans?.isConnected) chans.innerHTML = channels.map((name) => channelCard(name, expo)).join(''); }).catch(() => {});
+    const form = $('#ota-form');
+    app.onclick = (event) => {
+      const pick = event.target.closest('[data-pick]');
+      const filterButton = event.target.closest('[data-ota-filter]');
+      if (filterButton) { prefs.otaChannel = filterButton.dataset.otaFilter; PROJECT_SECTIONS.updates(data, box); return; }
+      if (pick && form) {
+        const input = [...form.elements.profile].find((item) => item.dataset.channel === pick.dataset.pick);
+        if (input) { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); form.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }
+    };
+    if (!form) return;
+    const confirmBox = $('#ota-confirm');
+    form.querySelectorAll('[data-last]').forEach((line) => {
+      const last = updates.find((build) => build.channel === line.dataset.last && build.status === 'success');
+      if (last) line.textContent = `Now: ${subject(last)} · ${ago(last.createdAt)}`;
+    });
+    let autoMessage = '';
+    const branchOf = () => data.branches.find((branch) => branch.name === form.elements.ref.value);
+    const chosen = () => form.querySelector('input[name="profile"]:checked');
+    const platformName = (value) => ({ ios: 'iOS', android: 'Android', all: 'iOS and Android' })[value] ?? value;
+    const sync = () => {
+      const profile = chosen();
+      const branch = branchOf();
+      form.elements.channel.value = profile?.dataset.channel ?? '';
+      $('#ota-commit').innerHTML = branch
+        ? `<span class="mono">${esc(branch.short)}</span><span class="trunc"><b>${esc(branch.subject ?? '')}</b></span><span class="faint">${esc(branch.author ?? '')}${branch.date ? ` · ${ago(branch.date)}` : ''}</span>${branch.pr ? `<span class="tag">${icon('pr', 'xs')}#${branch.pr.number}</span>` : ''}`
+        : '';
+      // The commit's subject is a good first message; once someone edits it, it stays theirs.
+      const message = form.elements.message;
+      if (branch && (!message.value || message.value === autoMessage)) { autoMessage = branch.subject ?? ''; message.value = autoMessage; }
+      const platform = form.elements.platform.value;
+      $('#ota-summary').innerHTML = profile
+        ? `To <b>${esc(profile.dataset.channel)}</b> · ${esc(platformName(platform))}${branch ? ` · <span class="mono">${esc(branch.name)}@${esc(branch.short)}</span>` : ''}`
+        : 'Choose a channel to publish to.';
+      $('#ota-review').textContent = profile ? `Review update to ${profile.dataset.channel}` : 'Review';
+      const steps = form.querySelectorAll('.ota-step');
+      [Boolean(profile), Boolean(branch), Boolean(form.elements.environment.value), Boolean(message.value.trim())].forEach((done, index) => { steps[index]?.toggleAttribute('data-done', done); });
+      confirmBox.hidden = true;
+      $('#ota-review').hidden = false;
+      $('#ota-error').textContent = '';
+    };
+    form.addEventListener('change', (event) => {
+      if (event.target.name === 'profile') form.elements.environment.value = event.target.dataset.environment || form.elements.environment.value;
+      sync();
+    });
+    form.elements.message.addEventListener('input', () => { confirmBox.hidden = true; $('#ota-review').hidden = false; form.querySelectorAll('.ota-step')[3]?.toggleAttribute('data-done', Boolean(form.elements.message.value.trim())); });
+    sync();
+    form.onsubmit = (event) => {
       event.preventDefault();
+      const profile = chosen();
+      if (!profile) { $('#ota-error').textContent = 'Choose a channel.'; return; }
       if (!form.reportValidity()) return;
       const values = Object.fromEntries(new FormData(form));
-      if (!confirm(`Publish OTA for ${data.name}?\nChannel: ${values.channel}\nEnvironment: ${values.environment}\nPlatform: ${values.platform}\nPushed branch: ${values.ref}\nMessage: ${values.message}\n\nCompatible installed apps may receive this update.`)) return;
-      const button = form.querySelector('button[type="submit"]');
-      button.disabled = true;
-      try {
-        const result = await post(`/api/projects/${encodeURIComponent(data.name)}/updates`, values);
-        if (result.error) $('#ota-error').textContent = result.error;
-        else location.hash = `#/build/${result.id}`;
-      } catch (error) { $('#ota-error').textContent = error.message; }
-      finally { button.disabled = false; }
+      const branch = branchOf();
+      const production = values.channel === 'production';
+      // Publishing reaches people's phones, so it takes a second, deliberate click.
+      confirmBox.innerHTML = `<div class="ota-confirm-head">${icon(production ? 'alert' : 'radio')}<b>Publish to ${esc(values.channel)}?</b></div>
+        <dl class="ota-confirm-list">
+          <div><dt>Ships</dt><dd><span class="mono">${esc(values.ref)}@${esc(branch?.short ?? '')}</span> ${esc(branch?.subject ?? '')}</dd></div>
+          <div><dt>To</dt><dd>${esc(platformName(values.platform))} installs on <b>${esc(values.channel)}</b>, profile ${esc(values.profile)}, environment ${esc(values.environment)}</dd></div>
+          <div><dt>Message</dt><dd>${esc(values.message)}</dd></div>
+        </dl>
+        <p class="hint">${production ? 'People using the app get it the next time they open it. ' : ''}Only installs with a compatible runtime receive it. A later update can replace it, but it can’t be taken back from phones that already have it.</p>
+        <div class="ota-confirm-do"><button type="button" class="btn ghost" data-ota-back>Back</button><button type="button" class="btn ${production ? 'danger-fill' : 'primary'}" data-ota-publish>${icon('radio')}Publish to ${esc(values.channel)}</button></div>`;
+      confirmBox.hidden = false;
+      $('#ota-review').hidden = true; // one way to publish at a time: the confirmation's own button
+      confirmBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      confirmBox.querySelector('[data-ota-back]').onclick = () => { confirmBox.hidden = true; $('#ota-review').hidden = false; };
+      confirmBox.querySelector('[data-ota-publish]').onclick = async (click) => {
+        const button = click.currentTarget;
+        button.disabled = true;
+        try {
+          const result = await post(`/api/projects/${encodeURIComponent(data.name)}/updates`, values);
+          if (result.error) { $('#ota-error').textContent = result.error; confirmBox.hidden = true; }
+          else location.hash = `#/build/${result.id}`;
+        } catch (error) { $('#ota-error').textContent = error.message; }
+        finally { button.disabled = false; }
+      };
     };
     if (updates.some(active)) every(3000, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(data.name)}`); if (!fresh.builds.filter((build) => build.action === 'update').some(active)) { route(); return 'stop'; } return undefined; });
   },
@@ -1174,72 +1282,196 @@ function setupBanner(setup) {
   const box = $('#setup-banner');
   if (!box || setup.setupComplete) return;
   const miss = (setup.doctor?.items ?? []).filter((item) => item.status === 'miss').length;
-  if (!miss) return;
-  box.innerHTML = `<div class="banner">${icon('mac')}<span>${plural(miss, 'setup item')} to fix</span><a class="btn sm" href="#/setup" style="margin-left:auto">Guide</a><button class="btn ghost sm" data-hide-setup aria-label="Dismiss">${icon('x')}</button></div>`;
+  const unfinished = setup.flow && !setup.flow.done;
+  if (!unfinished && !miss) return;
+  const text = unfinished ? (setup.flow.started ? 'Finish setting up macbuild' : 'Set up macbuild: find your apps, set up signing and try a build') : `${plural(miss, 'setup item')} to fix`;
+  box.innerHTML = `<div class="banner">${icon(unfinished ? 'cube' : 'mac')}<span>${text}</span><a class="btn sm" href="#/setup" style="margin-left:auto">${unfinished ? (setup.flow.started ? 'Continue' : 'Start') : 'Guide'}</a><button class="btn ghost sm" data-hide-setup aria-label="Dismiss">${icon('x')}</button></div>`;
   box.querySelector('[data-hide-setup]').onclick = async () => { await post('/api/setup', { setupComplete: true }); box.innerHTML = ''; };
 }
-const SETUP_STEPS = [['tools', 'Tools'], ['apps', 'Apps'], ['mac', 'This Mac'], ['phone', 'Phone']];
 function doctorRows(items) {
   return `<div class="rows">${(items ?? []).map((item) => `<div class="row compact">
     <span class="st ${item.status === 'ok' ? 'success' : item.status === 'miss' ? 'failed' : ''}">${icon(item.status === 'ok' ? 'check' : item.status === 'miss' ? 'cross' : 'skip')}</span>
     <span class="main"><span class="title">${esc(item.label)}</span><span class="meta wrap">${esc(item.detail)}</span></span>
   </div>`).join('')}</div>`;
 }
+
+// Setup: lib/setup.mjs sends a screen (title, the agent's words, fields, commands, buttons) and this draws it. The
+// same screens are the terminal's `macbuild setup`; whatever the agent asks becomes a choice, a checklist or a text box.
+const NOTE_ICON = { ok: 'check', bad: 'cross', warn: 'alert', info: 'dot' };
+ICONS.dot = '<circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/>';
+ICONS.sparkle = '<path d="M12 3.5c.6 4.3 2.2 5.9 6.5 6.5-4.3.6-5.9 2.2-6.5 6.5-.6-4.3-2.2-5.9-6.5-6.5 4.3-.6 5.9-2.2 6.5-6.5z"/><path d="M19 15.5c.3 1.8.9 2.4 2.5 2.7-1.6.3-2.2.9-2.5 2.7-.3-1.8-.9-2.4-2.5-2.7 1.6-.3 2.2-.9 2.5-2.7z"/>';
+ICONS.terminal = '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7.5 9.5 3 2.5-3 2.5M12.5 15h4"/>';
+ICONS.copy = '<rect x="8.5" y="8.5" width="12" height="12" rx="2.2"/><path d="M15.5 8.5V6a2.5 2.5 0 0 0-2.5-2.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5"/>';
+function setupNotes(notes) {
+  if (!notes?.length) return '';
+  const plain = notes.filter((note) => !note.code);
+  const code = notes.filter((note) => note.code);
+  return `${plain.length ? `<ul class="wz-notes">${plain.map((note) => `<li class="${esc(note.tone)}">${icon(NOTE_ICON[note.tone] ?? 'dot')}<span>${esc(note.text)}</span></li>`).join('')}</ul>` : ''}
+    ${code.length ? `<div class="wz-next">${code.map((note) => `<div class="wz-cmd"><code>${esc(note.code)}</code><span>${esc(note.text)}</span><button type="button" class="btn ghost sm" data-copy="${esc(note.code)}" aria-label="Copy">${icon('copy')}</button></div>`).join('')}</div>` : ''}`.trim();
+}
+function setupField(field, attached = []) {
+  const name = esc(field.id);
+  const help = field.help ? `<small>${esc(field.help)}</small>` : '';
+  if (field.kind === 'select' || field.kind === 'multi') {
+    const multi = field.kind === 'multi';
+    const chosen = new Set(multi ? field.value ?? [] : [field.value]);
+    // An answer a fix needs (a bundle identifier) sits inside that fix's card.
+    const inner = (option) => attached.filter((item) => item.attach.option === option.value);
+    return `<fieldset class="wz-field" data-field="${name}" data-kind="${field.kind}"><legend>${esc(field.label)}</legend>${help}
+      <div class="wz-options">${field.options.map((option) => `<div class="wz-option${option.disabled ? ' off' : ''}"><label class="wz-row">
+        <input type="${multi ? 'checkbox' : 'radio'}" name="${name}" value="${esc(option.value)}" ${chosen.has(option.value) || (multi && option.disabled && option.badge) ? 'checked' : ''} ${option.disabled ? 'disabled' : ''}>
+        <span class="wz-box" aria-hidden="true"></span>
+        <span class="wz-text"><span class="wz-label">${option.tag ? `<span class="wz-tag">${esc(option.tag)}</span>` : ''}${esc(option.label)}${option.badge ? `<span class="wz-badge">${esc(option.badge)}</span>` : ''}</span>${option.detail ? `<span class="wz-detail">${esc(option.detail)}</span>` : ''}</span>
+      </label>${inner(option).map((item) => `<div class="wz-inline" data-field="${esc(item.id)}" data-kind="text"><input class="input mono" name="${esc(item.id)}" value="${esc(item.value ?? '')}" placeholder="${esc(item.placeholder ?? '')}" aria-label="${esc(item.label)}" autocomplete="off" autocapitalize="off" spellcheck="false">${item.help ? `<small>${esc(item.help)}</small>` : ''}</div>`).join('')}</div>`).join('')}</div></fieldset>`;
+  }
+  if (field.kind === 'confirm') {
+    return `<label class="wz-field wz-switch toggle" data-field="${name}" data-kind="confirm"><span><b>${esc(field.label)}</b>${field.help ? `<small>${esc(field.help)}</small>` : ''}</span><input class="switch" type="checkbox" name="${name}" ${field.value !== false ? 'checked' : ''}></label>`;
+  }
+  return `<label class="wz-field" data-field="${name}" data-kind="text"><span class="wz-legend">${esc(field.label)}</span>${help}
+    <input class="input" name="${name}" value="${esc(field.value ?? '')}" placeholder="${esc(field.placeholder ?? '')}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>`;
+}
+function setupCommands(commands) {
+  if (!commands?.length) return '';
+  const needed = commands.filter((command) => !command.optional || command.status === 'done');
+  const extra = commands.filter((command) => command.optional && command.status !== 'done');
+  const rows = (items) => `<div class="wz-commands">${items.map(setupCommand).join('')}</div>`;
+  const what = extra.some((command) => command.id.startsWith('signing:')) ? 'For TestFlight, Google Play and Android builds' : 'Optional';
+  return `${needed.length ? rows(needed) : ''}${extra.length ? `<details class="wz-more"${needed.length ? '' : ' open'}><summary>${icon('right', 'sm')}${what}<span class="faint">${extra.length}</span></summary>${rows(extra)}</details>` : ''}`;
+}
+function setupCommand(command) {
+  return `<div class="wz-command ${esc(command.status)}" data-command="${esc(command.id)}">
+    <span class="st ${command.status === 'done' ? 'success' : command.status === 'failed' ? 'failed' : ''}">${icon(command.status === 'done' ? 'check' : command.status === 'failed' ? 'cross' : 'clock')}</span>
+    <div class="wz-command-main"><b>${esc(command.label)}</b>${command.status === 'failed' ? '<span class="wz-badge bad">Didn’t finish</span>' : ''}${command.detail ? `<p>${esc(command.detail)}</p>` : ''}</div>
+    ${command.status === 'done' ? '' : `<code>${esc(command.display)}</code>`}
+    ${command.status === 'done' ? '' : `<div class="wz-command-do">
+      <button type="button" class="btn sm" data-terminal="${esc(command.id)}">${icon('terminal')}Open Terminal</button>
+      <button type="button" class="btn ghost sm" data-copy="${esc(command.line)}" aria-label="Copy the command">${icon('copy')}</button>
+    </div>`}
+  </div>`;
+}
+function setupBusy(busy) {
+  const lines = busy.activity ?? [];
+  return `<div class="wz-busy" aria-live="polite">
+    <div class="wz-busy-head"><span class="wz-orbit${busy.agent ? ' agent' : ''}">${icon(busy.agent ? 'sparkle' : 'cube')}</span>
+      <div><b>${esc(busy.label)}</b><span class="faint num" data-since="${busy.startedAt}">${span(Date.now() - busy.startedAt)}</span></div></div>
+    <ol class="wz-feed">${lines.map((line, index) => `<li class="${index === lines.length - 1 ? 'now' : ''}">${esc(line)}</li>`).join('') || '<li class="now">Starting…</li>'}</ol>
+  </div>`;
+}
+function setupStepper(view) {
+  return `<ol class="wz-steps">${view.steps.map((step, index) => `<li class="${step.state}">${step.state === 'done' && view.step !== 'done' ? `<button type="button" data-goto="${esc(step.id)}">` : '<span>'}<i>${step.state === 'done' ? icon('check') : index + 1}</i><em>${esc(step.label)}</em>${step.state === 'done' && view.step !== 'done' ? '</button>' : '</span>'}</li>`).join('')}</ol>`;
+}
+function setupCard(view) {
+  const buttons = view.buttons ?? [];
+  const main = view.fields.filter((field) => !field.for && !field.attach);
+  const attached = (field) => view.fields.filter((item) => item.attach?.field === field.id);
+  const tucked = (id) => view.fields.filter((field) => field.for === id);
+  const primary = buttons.find((button) => button.primary) ?? buttons[0];
+  const others = buttons.filter((button) => button !== primary);
+  const button = (item, cls) => (item.href ? `<a class="btn ${cls}" href="${esc(item.href)}">${esc(item.label)}</a>`
+    : `<button type="${item === primary ? 'submit' : 'button'}" class="btn ${cls}" data-button="${esc(item.id)}" ${tucked(item.id).length ? 'data-reveal' : ''}>${esc(item.label)}</button>`);
+  const done = view.step === 'done';
+  return `<form class="wz-card" id="wz-form" novalidate>
+    ${done ? `<div class="wz-done">${icon('check')}</div>` : ''}
+    <h1>${esc(view.title)}</h1>
+    ${view.lead ? (view.by
+      ? `<figure class="wz-agent"><figcaption>${icon('sparkle')}${esc(view.by)}</figcaption><blockquote>${esc(view.lead)}</blockquote></figure>`
+      : `<p class="wz-lead">${esc(view.lead)}</p>`) : ''}
+    ${view.busy ? setupBusy(view.busy) : ''}
+    ${view.qr ? `<div class="wz-qr">${view.qrSvg ? `<div class="wz-qr-code" role="img" aria-label="QR code for ${esc(view.qr.url)}">${view.qrSvg}</div>` : ''}<div class="wz-qr-text"><b>Scan with your iPhone’s camera</b><p>or open this link in Safari:</p><div class="wz-cmd"><code>${esc(view.qr.url)}</code><button type="button" class="btn ghost sm" data-copy="${esc(view.qr.url)}" aria-label="Copy the link">${icon('copy')}</button></div></div></div>` : ''}
+    <div class="wz-live">${setupNotes(view.notes)}</div>
+    ${main.map((field) => setupField(field, attached(field))).join('')}
+    <div class="wz-live-commands">${setupCommands(view.commands)}</div>
+    ${others.filter((item) => tucked(item.id).length).map((item) => `<div class="wz-tucked" data-for="${esc(item.id)}" hidden>${tucked(item.id).map(setupField).join('')}<button type="button" class="btn" data-button="${esc(item.id)}" data-go>${esc(item.label)}</button></div>`).join('')}
+    ${buttons.length || view.back ? `<div class="wz-actions">
+      ${view.back && !view.busy ? `<button type="button" class="btn ghost" data-back="${esc(view.back)}">${icon('left')}Back</button>` : '<span></span>'}
+      <div class="wz-buttons">${others.map((item) => button(item, view.busy ? '' : 'ghost')).join('')}${primary ? button(primary, view.busy ? '' : 'primary') : ''}</div>
+    </div>` : ''}
+  </form>`;
+}
+function setupValues(form) {
+  const values = {};
+  form.querySelectorAll('[data-field]').forEach((box) => {
+    const name = box.dataset.field; const kind = box.dataset.kind;
+    if (kind === 'multi') values[name] = [...box.querySelectorAll('input:checked:not(:disabled)')].map((input) => input.value);
+    else if (kind === 'select') values[name] = box.querySelector('input:checked')?.value ?? '';
+    else if (kind === 'confirm') values[name] = box.querySelector('input').checked;
+    else values[name] = box.querySelector('input').value;
+  });
+  return values;
+}
 async function setupPage() {
-  const data = await get('/api/setup');
-  const miss = (data.doctor?.items ?? []).filter((item) => item.status === 'miss');
-  const step = prefs.setupStep ?? (miss.length ? 'tools' : data.projects.length ? 'mac' : 'apps');
-  const tools = data.doctor?.items ?? [];
-  const pane = {
-    tools: card('Tools', 'gear', tools.length ? doctorRows(tools) : empty('gear', 'Couldn’t read doctor', esc(data.doctor?.error ?? ''))),
-    apps: card('Apps', 'apps', data.projects.length
-      ? `<div class="rows">${data.projects.map((name) => `<a class="row" href="#/p/${esc(name)}">${avatar(name, 'sm')}<span class="main"><span class="title">${esc(name)}</span></span></a>`).join('')}</div>`
-      : empty('apps', 'No apps yet', 'Scan the usual project folders, or add one with macbuild add.'),
-    '<button class="btn sm" id="scan">Scan</button>'),
-    mac: card('This Mac', 'mac', `<div class="rows">
-      <label class="toggle"><span><b>Open at login</b></span><input class="switch" type="checkbox" id="login-at-login" ${data.loginAtLogin ? 'checked' : ''}></label>
-      <label class="toggle"><span><b>Menu bar</b></span><input class="switch" type="checkbox" id="menubar" ${data.menubar ? 'checked' : ''}></label>
-    </div>`),
-    phone: card('Phone', 'phone', `<div class="setting">
-      <div><b>This Mac</b><p class="hint mono" id="local-url">${esc(data.localUrl)}</p></div>
-      <div><b>On your tailnet</b><p class="hint mono" id="phone-url">${esc(data.phoneUrl || 'Tailscale not publishing HTTPS yet')}</p></div>
-      <div class="inline">${data.phoneUrl ? '<button class="btn sm" id="copy-phone">Copy phone URL</button>' : ''}<button class="btn sm ghost" id="copy-local">Copy local URL</button></div>
-    </div>`),
-  };
-  app.innerHTML = `${mobileTop()}${header('Setup', '', `<a class="btn ghost sm" href="#/settings">${icon('left')}Settings</a>`)}
-    <div class="setup">
-      <div class="seg" role="tablist">${SETUP_STEPS.map(([key, label]) => `<button data-step="${key}" class="${step === key ? 'on' : ''}" aria-selected="${step === key}">${label}</button>`).join('')}</div>
-      ${pane[step] ?? pane.tools}
-      <div class="setup-foot">
-        ${miss.length ? `<p class="hint">${plural(miss.length, 'item')} still missing</p>` : '<p class="hint ok">Ready to build</p>'}
-        <button class="btn primary" id="setup-done">${miss.length ? 'Done for now' : 'Done'}</button>
-      </div>
-    </div>`;
-  const save = async (changes) => {
-    const result = await post('/api/setup', changes);
-    if (result.error) { flash(result.error, true); return; }
-    route();
-  };
-  const login = $('#login-at-login');
-  if (login) login.onchange = () => save({ loginAtLogin: login.checked });
-  const bar = $('#menubar');
-  if (bar) bar.onchange = () => save({ menubar: bar.checked });
-  app.onclick = async (event) => {
-    const next = event.target.closest('[data-step]');
-    if (next) { prefs.setupStep = next.dataset.step; setupPage().catch(() => {}); return; }
-    if (event.target.closest('#scan')) {
-      event.target.closest('#scan').disabled = true;
-      await post('/api/projects/scan');
-      route();
+  let view = await get('/api/setup/flow');
+  let shape = '';
+  const draw = (next) => {
+    view = next;
+    // Same step and nothing to type into changed: refresh only what moves, so half-filled answers stay.
+    const key = JSON.stringify([view.step, Boolean(view.busy), view.title, view.fields.map((field) => [field.id, field.options?.length]), view.buttons.map((item) => item.id), view.commands.map((item) => item.id)]);
+    if (key === shape && !view.busy && $('#wz-form')) {
+      $('.wz-live').innerHTML = setupNotes(view.notes);
+      const open = $('.wz-more')?.open;
+      $('.wz-live-commands').innerHTML = setupCommands(view.commands);
+      if (open && $('.wz-more')) $('.wz-more').open = true;
       return;
     }
-    if (event.target.closest('#copy-phone') && data.phoneUrl) {
-      try { await navigator.clipboard.writeText(data.phoneUrl); flash('Copied'); } catch { flash(data.phoneUrl); }
+    if (key === shape && view.busy && $('.wz-busy')) { $('.wz-busy').outerHTML = setupBusy(view.busy); tick(); return; }
+    shape = key;
+    app.innerHTML = `<div class="wizard">
+      <header class="wz-top"><a class="brand" href="#/"><span class="mark">${icon('cube')}</span>macbuild<span class="tag">setup</span></a><a class="btn ghost sm" href="#/">${view.step === 'done' ? 'Close' : 'Finish later'}</a></header>
+      ${setupStepper(view)}
+      ${setupCard(view)}
+    </div>`;
+    tick();
+    const first = $('#wz-form input.input');
+    if (first && matchMedia('(min-width: 720px)').matches) first.focus();
+  };
+  const send = async (button, values = {}, from) => {
+    const form = $('#wz-form');
+    form?.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+    from?.classList.add('working');
+    const response = await fetch('/api/setup/flow', { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify({ step: view.step, button, values }) });
+    const result = await response.json().catch(() => ({}));
+    if (result.error) flash(result.error, true);
+    draw(result.view ?? (result.step ? result : await get('/api/setup/flow')));
+    if (view.step !== 'done') loadShell();
+  };
+  draw(view);
+  every(() => (view.busy ? 900 : view.commands.some((item) => item.status !== 'done') ? 2500 : 0) || 5000, async () => {
+    if (!view.busy && !view.commands.some((item) => item.status !== 'done')) return;
+    draw(await get('/api/setup/flow'));
+  });
+  app.onsubmit = (event) => {
+    event.preventDefault();
+    const primary = view.buttons.find((item) => item.primary) ?? view.buttons[0];
+    if (primary && !primary.href) send(primary.id, setupValues(event.target), event.submitter);
+  };
+  app.onclick = async (event) => {
+    const target = event.target.closest('button, a');
+    if (!target) return;
+    if (target.dataset.copy !== undefined) {
+      try { await navigator.clipboard.writeText(target.dataset.copy); flash('Copied'); } catch { flash(target.dataset.copy); }
+      return;
     }
-    if (event.target.closest('#copy-local')) {
-      try { await navigator.clipboard.writeText(data.localUrl); flash('Copied'); } catch { flash(data.localUrl); }
+    if (target.dataset.terminal) {
+      target.disabled = true;
+      const result = await post('/api/setup/terminal', { id: target.dataset.terminal });
+      target.disabled = false;
+      if (result.error) {
+        try { if (result.line) await navigator.clipboard.writeText(result.line); } catch {}
+        flash(result.line ? `${result.error} It’s copied.` : result.error, true);
+      } else flash(`Opened Terminal on ${machineName()}`);
+      return;
     }
-    if (event.target.closest('#setup-done')) { await save({ setupComplete: true }); location.hash = '#/'; }
+    if (target.dataset.back || target.dataset.goto) { send('back', { to: target.dataset.back || target.dataset.goto }, target); return; }
+    if (target.dataset.button && target.type !== 'submit') {
+      const tucked = target.hasAttribute('data-reveal') && $(`.wz-tucked[data-for="${target.dataset.button}"]`);
+      if (tucked && tucked.hidden) { tucked.hidden = false; tucked.querySelector('input')?.focus(); target.hidden = true; return; }
+      send(target.dataset.button, setupValues($('#wz-form')), target);
+    }
+  };
+  app.onkeydown = (event) => {
+    // Enter in a tucked-away field (the folder to search) runs its own button, not the step's.
+    const tucked = event.target.closest?.('.wz-tucked');
+    if (event.key === 'Enter' && tucked) { event.preventDefault(); tucked.querySelector('[data-go]').click(); }
   };
 }
 
@@ -1408,9 +1640,18 @@ async function route() {
   routing.controller.abort(); routing.controller = new AbortController();
   routing.timers.forEach(clearTimeout); routing.timers = [];
   hideTip(); toast('');
-  app.onclick = null; app.onchange = null;
+  app.onclick = null; app.onchange = null; app.onsubmit = null; app.onkeydown = null;
   const where = parseRoute();
+  if (routing.first) {
+    // A new install with no apps yet opens on setup.
+    routing.first = false;
+    if (where.page === 'builds' && !shell.projects.length) {
+      const flow = await get('/api/setup').then((data) => data.flow).catch(() => null);
+      if (flow && !flow.done) { location.replace('#/setup'); return; } // hashchange routes again
+    }
+  }
   app.dataset.page = where.page;
+  document.body.classList.toggle('focus', where.page === 'setup');
   renderShell(where);
   try {
     await PAGES[where.page](where);

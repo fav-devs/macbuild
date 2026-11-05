@@ -10,7 +10,7 @@ macbuild builds Expo iOS and Android apps on this Mac with `eas build --local`. 
    curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh | bash
    ```
    Add `-s -- --ui` for the web UI. Add `--guard` only if the user asks to block EAS cloud builds, because it wraps their `eas` command.
-3. Run `macbuild setup` (or `macbuild doctor`) and fix each `MISS` line. It prints the command for each one. Installing Xcode, signing in to Expo (`eas login`) and Apple prompts need the user, so ask them. Don't request or store their passwords in chat.
+3. Run `macbuild setup --status` (or `macbuild doctor`) and fix each `MISS` line. Plain `macbuild setup` in a terminal is the guided setup for a person (it asks questions); without a terminal it prints the same status. If the user would rather click through it, tell them to run `macbuild setup` themselves. It prints the command for each one. Installing Xcode, signing in to Expo (`eas login`) and Apple prompts need the user, so ask them. Don't request or store their passwords in chat.
 4. For the dashboard and menu bar: `macbuild setup --ui`. That starts Tailscale if it is signed in and publishes the dashboard on the tailnet (`https://<this-mac>.*.ts.net:8443`). `macbuild setup --tailscale` does only that, without restarting the UI. `macbuild setup --login` / `--nologin` and `--menubar` / `--no-menubar` toggle those without restarting a running build. The in-app guide is `#/setup`.
 5. Run `macbuild list`. If an app is missing, run `macbuild add <name> <path>` with the folder holding `eas.json`. In a monorepo that's the app folder.
 6. Optional: fill in `~/.config/macbuild/env`. Never commit this file.
@@ -67,6 +67,16 @@ Wait for a dashboard job with `macbuild wait`. Inspect with `macbuild builds`, `
 - Remote OTA/submission requires a user-authorized release, token scope, and `--confirm-release` (MCP `confirmRelease: true`). Test only with fake workers, never publish to test functionality. Queue with `macbuild PROJECT`, monitor using `macbuild wait ID --json`, download with `macbuild download ID --output FILE`.
 - Remote MCP runs with `macbuild --remote NAME mcp` in the client's project checkout. Local administration uses `macbuild --local ...`. New modules: `lib/remote-access.mjs` (token policy), `lib/remote-api.mjs` (versioned restricted API), `lib/remote-client.mjs` (HTTPS/source gates), `lib/remote-mcp.mjs` (stdio tools). Keep the dashboard loopback-only. This is trusted-tailnet execution, not a multi-user code sandbox; remote scopes do not replace dashboard network ACLs.
 - Validate package contents with `npm pack --dry-run`. Do not publish npm packages without an explicit user request. Cross-platform client tests: `node --test test/remote.test.mjs`; full worker tests still use the UI dependencies and macOS/Linux.
+
+### First-time setup
+
+- `lib/setup.mjs` is the guided setup: eight steps, each a screen of fields, commands and buttons, saved in `~/.config/macbuild/setup.json`. `lib/setup-cli.mjs` draws the screens in the terminal with `lib/tui.mjs` (no dependencies); the dashboard's `#/setup` draws the same screens from `/api/setup/flow`. Change a step in `lib/setup.mjs` and both follow.
+- The agent (Claude Code or Codex, `lib/setup-agent.mjs`) is read-only: Claude Code with only Read, Glob and Grep, Codex with `--sandbox read-only`. Its instructions are `skills/macbuild-setup/SKILL.md`, and every answer is checked against `SCHEMA` and `sanitizeReview` before the user sees it. macbuild applies a fix only from `applyAction`'s list, after the user ticks it. A new kind of fix needs all three: the skill's table, `ACTION_TYPES`/`sanitizeReview`, and `applyAction`.
+- The Phone step reads Tailscale the way `lib/tailscale.sh` does (`MACBUILD_TAILSCALE` names the binary, empty means none) and only ever offers commands for the person to run: install, sign in, `tailscale serve`. Serve stays tailnet-only, never Funnel.
+- Signing is never automated: it's `eas credentials:configure-build` in a terminal, where the user signs in to Apple. The dashboard's Open Terminal runs only commands the current screen lists, and `MACBUILD_NO_TERMINAL=1` (the demo and tests) turns it off.
+- `ui/demo/fake-agent.mjs` stands in for both agents in the demo and the tests. `test/drive-tty.py` types into the terminal UI through a pseudo-terminal. The demo also serves the real terminal setup in a browser on its port + 1 (`ui/demo/terminal.mjs`, with `pty-bridge.py`); `MACBUILD_SETUP_DEMO=1` there means nothing gets installed for real.
+
+### The rest
 
 - `bin/macbuild`: the CLI. Must run on macOS's bash 3.2.
 - `lib/eas_pty.py`: runs `eas` in a terminal so prompts can be answered. New prompts go in `SPECS` in `bin/macbuild`.

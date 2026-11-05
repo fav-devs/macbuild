@@ -26,19 +26,42 @@ With the web UI, and a block on EAS cloud builds:
 curl -fsSL https://raw.githubusercontent.com/fav-devs/macbuild/main/install.sh | bash -s -- --ui --guard
 ```
 
-The installer finds Expo apps in your usual project folders, then runs `macbuild doctor` to show anything missing. Run the same command again to update.
+Run the same command again to update. With `--ui`, the dashboard starts at login and a hammer sits in the menu bar.
 
-With `--ui`, the dashboard starts at login and a hammer sits in the menu bar. Walk through the rest in the setup guide:
+You need a Mac with Xcode, Node.js, CocoaPods, fastlane, `eas-cli` (signed in with `eas login`) and an Apple Developer account. For Android, add Android Studio (for its SDK) and Java 17. GitHub CLI and Tailscale are optional.
+
+### First-time setup
+
+In a terminal, the installer ends with the guided setup. It asks whether to carry on in the terminal or in the browser, then walks through eight steps:
+
+<p>
+  <img src="docs/setup-terminal.png" width="49%" alt="Setup in the terminal: Claude Code found four apps, with a checklist to add them">
+  <img src="docs/setup.png" width="49%" alt="The same step in the browser">
+</p>
+
+1. **Agent.** Pick Claude Code or Codex if you have one. It works in the background, read-only: Claude Code gets only its Read, Glob and Grep tools, and Codex runs in its read-only sandbox. Both follow [the setup skill](skills/macbuild-setup/SKILL.md).
+2. **Apps.** The agent looks for Expo and React Native apps, in your usual code folders and beyond, and reads each one. You tick the ones to add, or point it at another folder.
+3. **Tools.** `macbuild doctor`, with the command for each missing tool ready to run.
+4. **Check.** Anything that would make EAS stop and ask during a build: no bundle identifier, no EAS project, no development profile, no `expo-dev-client`. Each fix is listed for you to approve, with a suggested value you can change. macbuild makes the change, from a fixed list of fixes it knows; the agent never edits anything.
+5. **Signing.** `eas credentials:configure-build` for each app, in a terminal, where you sign in to Apple yourself. macbuild and the agent never see your password.
+6. **This Mac.** The dashboard at login, the iPhone for `--install` and your Apple ID.
+7. **Phone.** Tailscale, so the dashboard opens on your phone and stays private to your tailnet: install it, sign in, and publish the dashboard with `tailscale serve`. Then a link and a QR code for your iPhone. Skip it to keep the dashboard on the Mac only.
+8. **First build.** A development build of the app you pick.
+
+Without an agent, macbuild's own scan and checks do steps 2 and 4. Setup remembers where you got to, in the terminal and the browser alike.
 
 ```sh
-macbuild setup            # what's missing, the dashboard URL, login and menu bar
-macbuild setup --ui       # dashboard + menu bar + Tailscale Serve
+macbuild setup             # the guided setup: in this terminal, or in the browser
+macbuild setup --cli       # straight to the terminal; --web for the browser
+macbuild setup --agent codex   # pick the agent up front: claude, codex or none; --reset starts over
+macbuild setup --status    # what's set up and what's missing, for scripts and agents
+macbuild setup --ui        # dashboard + menu bar + Tailscale Serve
 macbuild setup --tailscale # start Tailscale and publish the dashboard on the tailnet
-macbuild setup --login    # open at login
-macbuild setup --open     # open the guide in the browser
+macbuild setup --login     # open at login
+macbuild setup --open      # open the setup page in the browser
 ```
 
-Or open `#/setup` on the dashboard. You need a Mac with Xcode, Node.js, CocoaPods, fastlane, `eas-cli` (signed in with `eas login`) and an Apple Developer account. For Android, add Android Studio (for its SDK) and Java 17. GitHub CLI and Tailscale are optional.
+The first time you run plain `macbuild`, it offers the same setup. In the browser it's the dashboard's `#/setup` page; if the dashboard isn't installed yet, `macbuild setup --web` serves it until you finish, then installs it if you asked for that.
 
 ### Using an AI agent
 
@@ -160,6 +183,7 @@ Signing credentials stay with EAS and your Mac. Your Apple password, if you set 
 | `~/.config/macbuild/projects.conf` | Your projects, one `name\|path` per line |
 | `~/.config/macbuild/env` | The settings above |
 | `~/.config/macbuild/ui.json` | Web UI automatic-build rules, notification keys, webhook and `appleTeam` |
+| `~/.config/macbuild/setup.json` | How far setup got, what it found, and which signing commands finished |
 | `~/.local/share/macbuild/fingerprints` | The native fingerprint of each build, for `--skip-unchanged` |
 | `~/.local/share/macbuild/builds` | Web UI build history: the last 200 builds, with IPAs for the last 10 |
 | `~/.cache/macbuild` | Work folders and checkouts. Safe to delete between builds. |
@@ -296,11 +320,12 @@ Running CLI jobs parse their full script before starting, so editing `bin/macbui
 ```sh
 git clone https://github.com/fav-devs/macbuild.git && cd macbuild
 npm ci --prefix ui
-node ui/demo/demo.mjs        # the dashboard with sample projects and a build running, at http://localhost:4181
+node ui/demo/demo.mjs        # the dashboard with sample projects and a build running, at http://localhost:4181 (setup: #/setup)
+                             # and the terminal setup in a browser, at http://localhost:4182
 node --test test/*.test.mjs  # tests for the CLI and the web UI's server
 ```
 
-The demo uses stand-ins for `eas`, `gh` and GitHub, so it runs on any machine and never touches your projects. The screenshots above come from it. CI runs the tests on Linux and macOS, plus `shellcheck` on the scripts. [AGENTS.md](AGENTS.md) has notes on how the pieces fit together.
+The demo uses stand-ins for `eas`, `gh`, GitHub and the setup agent (`ui/demo/fake-agent.mjs`, as `claude` and `codex`), so it runs on any machine and never touches your projects. The screenshots above come from it. CI runs the tests on Linux and macOS, plus `shellcheck` on the scripts. [AGENTS.md](AGENTS.md) has notes on how the pieces fit together.
 
 ## License
 

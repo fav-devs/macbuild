@@ -12,7 +12,7 @@
 #   --send             Taildrop the build to MACBUILD_TAILDROP_TARGET
 #   --output PATH      where the build goes (default: your Desktop)
 #   macbuild update <project> --profile production --channel production --message "Fix" --ref main [--environment production] [--platform ios|android|all]
-# Other commands: macbuild list | add <name> <path> | scan | doctor | setup | builds | log | show | wait | mcp | commit <name> [--push] | ask [id|project] [--codex]
+# Other commands: macbuild list | add <name> <path> | scan | doctor | setup [--cli|--web|--status] | builds | log | show | wait | mcp | commit <name> [--push] | ask [id|project] [--codex]
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 # Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
@@ -138,9 +138,16 @@ print(m.group(1) if m and m.group(1) else "http://127.0.0.1:4180")
 '
 }
 setup_cmd() {
-  local do_ui=0 do_login="" do_bar="" do_open=0 do_ts=0 net
+  local do_ui=0 do_login="" do_bar="" do_open=0 do_ts=0 net arg
+  # The guided setup (lib/setup-cli.mjs): questions in this terminal, or the same steps in the browser. Without a
+  # terminal (an agent, a script), plain `macbuild setup` prints the status below instead.
+  for arg in "$@"; do
+    case "$arg" in --cli|--terminal|--web|--browser|--agent|--reset|--first-run|--mark) node "$ROOT/lib/setup-cli.mjs" "$@"; return $?;; esac
+  done
+  if [ $# = 0 ] && [ -t 0 ] && [ -t 1 ]; then node "$ROOT/lib/setup-cli.mjs"; return $?; fi
   for arg in "$@"; do
     case "$arg" in
+      --status) ;;
       --ui) do_ui=1;;
       --login) do_login=1;;
       --nologin|--no-login) do_login=0;;
@@ -149,7 +156,7 @@ setup_cmd() {
       --open) do_open=1;;
       --tailscale) do_ts=1;;
       --json) doctor --json; return $?;;
-      -h|--help) printf '%s\n' "macbuild setup [--ui] [--login|--nologin] [--menubar|--no-menubar] [--tailscale] [--open]"; return 0;;
+      -h|--help) printf '%s\n' "macbuild setup                guided setup: find your apps, check tools, set up signing (needs a terminal)" "macbuild setup --cli|--web    the guided setup here, or in the browser; --agent claude|codex|none, --reset to start over" "macbuild setup --status       what's set up, for scripts and agents" "macbuild setup [--ui] [--login|--nologin] [--menubar|--no-menubar] [--tailscale] [--open]"; return 0;;
       *) echo "unknown option $arg"; return 2;;
     esac
   done
@@ -313,6 +320,7 @@ case "${1:-}" in
   commit) shift; commit_cmd "$@"; exit $?;;
   ask) shift; exec node "$ROOT/lib/ask.mjs" "$@";;
 esac
+ARGC=$#
 NAME=""; PROFILE=""; PLATFORM="ios"; FAST=0; SEND=0; INSTALL=0; SUBMIT=0; TESTFLIGHT=0; SKIP_UNCHANGED=0; OUT=""; REF=""; SCREENSHOT=""; SUBMIT_ONLY=""
 UPDATE=0; CHANNEL=""; MESSAGE=""; ENVIRONMENT=""
 if [ "${1:-}" = update ] || [ "${1:-}" = ota ]; then UPDATE=1; PLATFORM=all; shift; fi
@@ -336,7 +344,12 @@ while [ $# -gt 0 ]; do
     *) NAME="$1";;
   esac; shift
 done
-[ -n "$NAME" ] || { echo "usage: macbuild <project> [--platform ios|android] [--install|--submit|--fast|--send|--profile NAME]"; exit 2; }
+if [ "$ARGC" = 0 ] && [ -t 0 ] && [ -t 1 ]; then
+  # The first time, plain `macbuild` offers the guided setup. It exits 3 once setup is done or was put off.
+  node "$ROOT/lib/setup-cli.mjs" --first-run; rc=$?
+  [ "$rc" = 3 ] || exit "$rc"
+fi
+[ -n "$NAME" ] || { echo "usage: macbuild <project> [--platform ios|android] [--install|--submit|--fast|--send|--profile NAME]"; [ "$ARGC" = 0 ] && echo "new here? macbuild setup walks you through it"; exit 2; }
 case "$PLATFORM:$UPDATE" in ios:*|android:*|all:1) ;; *) echo "--platform is ios or android (or all for OTA)"; exit 2;; esac
 if [ "$UPDATE" = 1 ]; then
   [ "$INSTALL$SEND$SKIP_UNCHANGED$SUBMIT$FAST" = 00000 ] && [ -z "$OUT$SCREENSHOT$SUBMIT_ONLY" ] || { echo "OTA cannot build, install, or submit to a store"; exit 2; }

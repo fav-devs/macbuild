@@ -18,6 +18,7 @@ import { updateOptions } from '../lib/update.mjs';
 import { remoteApi } from '../lib/remote-api.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
 import { listAskChoices, parseAskChoice, startAsk } from '../lib/ask.mjs';
+import { SetupFlow } from '../lib/setup.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -525,8 +526,8 @@ async function agentLoaded(label) {
   try { await run('launchctl', ['print', `gui/${uid}/${label}`], { timeout: 4000 }); return true; } catch { return false; }
 }
 let doctorCache = { at: 0, data: null };
-async function doctorReport() {
-  if (Date.now() - doctorCache.at < 15000 && doctorCache.data) return doctorCache.data;
+async function doctorReport(fresh = false) {
+  if (!fresh && Date.now() - doctorCache.at < 15000 && doctorCache.data) return doctorCache.data;
   try {
     const { stdout } = await run(BIN, ['doctor', '--json'], { timeout: 25000, maxBuffer: 1 << 20 });
     const line = stdout.trim().split('\n').filter(Boolean).at(-1);
@@ -537,12 +538,44 @@ async function doctorReport() {
   return doctorCache.data;
 }
 const slimBuild = (build) => (build ? { id: build.id, project: build.project, profile: build.profile, status: build.status, subject: build.commit?.subject ?? '' } : null);
+// The guided setup at #/setup (lib/setup.mjs). MACBUILD_SETUP_TEMP means `macbuild setup --web` started this server
+// just for setup: it can't install itself at login, and the first build is started from the terminal afterwards.
+const setupFlow = new SetupFlow({
+  surface: 'web', bin: BIN,
+  hooks: {
+    doctor: (fresh) => doctorReport(fresh),
+    devices: listDevices,
+    uiInstalled: () => !process.env.MACBUILD_SETUP_TEMP,
+    startBuild: process.env.MACBUILD_SETUP_TEMP ? undefined
+      : ({ app, profile, install }) => enqueue({ project: app, profile, platform: 'ios', install, trigger: 'manual', by: 'setup' }),
+  },
+});
+// The phone step shows its link as a QR code too, drawn here where the qrcode package is.
+const withQr = async (view) => (view?.qr?.url ? { ...view, qrSvg: await QRCode.toString(view.qr.url, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' }) } : view);
+const appleString = (text) => `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+async function setupTerminal(req, res) {
+  const { id } = await body(req);
+  // Only a command the current screen lists: its text comes from macbuild, never from the request.
+  const command = typeof id === 'string' ? await setupFlow.command(id) : null;
+  if (!command) return json(res, 404, { error: 'That command isn’t on this step any more.' });
+  const line = setupFlow.terminalLine(command);
+  // The demo and the tests set MACBUILD_NO_TERMINAL: their commands must never run in a real Terminal.
+  if (process.platform !== 'darwin' || process.env.MACBUILD_NO_TERMINAL) return json(res, 400, { error: 'Paste the command into a terminal on the Mac.', line });
+  try {
+    await run('osascript', ['-e', `tell application "Terminal" to do script ${appleString(line)}`, '-e', 'tell application "Terminal" to activate'], { timeout: 15000 });
+    return json(res, 200, { ok: true, line });
+  } catch {
+    return json(res, 400, { error: 'Couldn’t open Terminal. Paste the command into one instead.', line });
+  }
+}
 async function setupView() {
   const cfg = config();
   const doctor = await doctorReport();
   const barOn = await agentLoaded('local.macbuild.menubar');
+  const flow = setupFlow.load();
   return {
     setupComplete: Boolean(cfg.setupComplete),
+    flow: { step: flow.step, done: Boolean(flow.doneAt), started: flow.step !== 'welcome' },
     loginAtLogin: existsSync(UI_PLIST) ? plistLogin(UI_PLIST) : cfg.loginAtLogin !== false,
     menubar: barOn,
     menubarInstalled: existsSync(BAR_BIN),
@@ -1172,6 +1205,14 @@ async function api(req, res, url) {
   if (url.pathname === '/api/system' && req.method === 'GET') return json(res, 200, await system());
   if (url.pathname === '/api/setup' && req.method === 'GET') return json(res, 200, await setupView());
   if (url.pathname === '/api/setup' && req.method === 'POST') return applySetup(req, res);
+  if (url.pathname === '/api/setup/flow' && req.method === 'GET') return json(res, 200, await withQr(await setupFlow.view()));
+  if (url.pathname === '/api/setup/flow' && req.method === 'POST') {
+    const { step, button, values } = await body(req, 65536);
+    const result = await setupFlow.submit({ step, button: typeof button === 'string' ? button : 'continue', values: values && typeof values === 'object' && !Array.isArray(values) ? values : {} });
+    if (result.error) return json(res, 409, { error: result.error, view: await withQr(await setupFlow.view()) });
+    return json(res, 200, await withQr(await setupFlow.view()));
+  }
+  if (url.pathname === '/api/setup/terminal' && req.method === 'POST') return setupTerminal(req, res);
   if (url.pathname === '/api/menubar' && req.method === 'GET') return json(res, 200, menubarView());
   if (url.pathname === '/api/projects/scan' && req.method === 'POST') {
     await run(BIN, ['scan'], { timeout: 60000 }).catch(() => {});
