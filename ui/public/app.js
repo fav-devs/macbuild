@@ -1036,12 +1036,11 @@ async function devSection(data, box) {
   }
   // The terminal view: xterm.js on Expo's raw output, streamed from the Mac; what you type goes back to Expo.
   let term = null;
-  let termResize = () => {};
   if (live) {
     const source = new EventSource(`/api/dev/${encodeURIComponent(name)}/stream`);
     const pending = [];
     source.onmessage = (event) => { const bytes = Uint8Array.from(atob(event.data), (c) => c.charCodeAt(0)); if (term) term.write(bytes); else pending.push(bytes); };
-    source.addEventListener('state', (event) => { const session = JSON.parse(event.data); if (!session) return; const width = view.session?.cols; redraw(session); if (session.cols !== width) termResize(); });
+    source.addEventListener('state', (event) => { const session = JSON.parse(event.data); if (session) redraw(session); });
     source.addEventListener('exit', () => { source.close(); setTimeout(() => { if (token === routing.token) route(); }, 600); });
     routing.cleanups.push(() => source.close());
     loadXterm().then((Terminal) => {
@@ -1054,15 +1053,14 @@ async function devSection(data, box) {
       for (const bytes of pending.splice(0)) term.write(bytes);
       if (!view.session.external) term.onData((data) => send({ text: data, enter: false })); // one in a terminal takes keys there
       let sized = '';
-      // One in your own terminal keeps that terminal's width (macbuild can't resize it), so lines break where they do there.
+      // One in your own terminal fits the page too; macbuild can't resize that terminal, so it isn't asked to.
       const resize = () => {
         if ($('#dev-term').hidden) return;
         try { fit.fit(); } catch { return; }
-        if (view.session?.terminal) { if (view.session.cols && term.cols !== view.session.cols) term.resize(view.session.cols, term.rows); return; }
+        if (view.session?.terminal) return;
         const size = `${term.cols}x${term.rows}`;
         if (size !== sized) { sized = size; post(`/api/dev/${encodeURIComponent(name)}/resize`, { cols: term.cols, rows: term.rows }); }
       };
-      termResize = resize;
       const observer = new ResizeObserver(() => { clearTimeout(observer.timer); observer.timer = setTimeout(resize, 120); });
       observer.observe($('#dev-term'));
       resize();
