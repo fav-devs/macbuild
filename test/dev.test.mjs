@@ -45,7 +45,7 @@ function home() {
   mkdirSync(join(dir, 'bin'));
   writeFileSync(join(dir, 'bin/npx'), `#!/bin/sh\n[ "$1 $2" = "expo start" ] && exec node ${JSON.stringify(join(ROOT, 'ui/demo/fake-expo.mjs'))} "$@"\nexit 1\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'projects.conf'), ['habit|code/habit', 'go|code/go', 'shop|code/mono/apps/shop', 'plain|code/plain'].map((line) => line.replace('|', `|${dir}/`)).join('\n'));
-  const env = { ...process.env, HOME: dir, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, FAKE_EXPO_SPEED: '6' };
+  const env = { ...process.env, HOME: dir, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, FAKE_EXPO_SPEED: process.env.FAKE_EXPO_SPEED ?? '6' };
   for (const name of Object.keys(env)) if (name.startsWith('MACBUILD_')) delete env[name];
   const projects = () => readFileSync(join(dir, 'projects.conf'), 'utf8').split('\n').map((line) => { const [name, path] = line.split('|'); return { name, dir: path }; });
   return { dir, env, projects };
@@ -265,6 +265,8 @@ test('the dashboard runs dev servers for the page, macbuild dev, MCP and remote 
     const status = cli(['status', 'habit']);
     assert.match(status.stdout, /habit: running on port \d+/);
     assert.match(status.stdout, /Command: cd .*code\/habit && npx expo start --port \d+/);
+    // The first bundle (the stand-in phone connecting) has to land first, or wait would match it instead.
+    await until(async () => (await call(port, '/api/dev/habit')).json.session.bundles.ios?.done);
     const next = (await call(port, '/api/dev/habit/log?tail=1')).json.next;
     assert.equal(cli(['key', 'habit', 'r']).stdout.trim(), 'Pressed r.');
     const waited = cli(['wait', 'habit', '--since', String(next), '--timeout', '20']);
