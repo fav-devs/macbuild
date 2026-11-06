@@ -21,6 +21,8 @@ Remote:  macbuild [build] PROJECT [--profile development] [--ref BRANCH] [--wait
          macbuild list | commits PROJECT [--ref BRANCH] | builds [PROJECT] | show [ID|PROJECT] | log [ID|PROJECT]
          macbuild wait [ID|PROJECT] [--timeout SECONDS] [--follow]
          macbuild cancel ID | download ID --output FILE | doctor | mcp
+Dev:     macbuild dev [PROJECT] | dev stop PROJECT | dev log PROJECT [--follow] | dev key PROJECT r
+         macbuild dev wait PROJECT | dev answer PROJECT yes   (the Mac's dev servers; see macbuild dev --help)
 Source:  macbuild source [--ref BRANCH] | push --confirm-push
          Commit deliberately with git add <paths> && git commit, then push.
 
@@ -59,6 +61,15 @@ export async function main(args = process.argv.slice(2)) {
       child.on('error', reject);
       child.on('close', (code) => resolveExit(code ?? 1));
     });
+  }
+  // dev has its own options (lib/dev-cli.mjs): pass everything but --remote NAME through.
+  const remoteAt = args.indexOf('--remote');
+  const devArgs = args.filter((_, index) => remoteAt < 0 || (index !== remoteAt && index !== remoteAt + 1));
+  if (devArgs[0] === 'dev') {
+    const server = selectedRemote(remoteAt >= 0 ? args[remoteAt + 1] : undefined);
+    if (!server) throw new Error('Connect a remote first. See macbuild --help.');
+    const { devMain, remoteTransport } = await import('../lib/dev-cli.mjs');
+    return devMain(devArgs.slice(1), remoteTransport(new RemoteClient(server)));
   }
   const { values, positionals } = parseArgs(args);
   let [command, target, extra] = positionals;

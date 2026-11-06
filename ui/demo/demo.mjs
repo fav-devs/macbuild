@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnose } from '../../lib/diagnose.mjs';
 import { startTerminal } from './terminal.mjs';
+import { addMetroHook } from '../../lib/metro-hook.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 0) || 4181;
@@ -64,7 +65,16 @@ for (const [index, project] of PROJECTS.entries()) {
     submit: { production: {} },
   }, null, 2)}\n`);
   writeFileSync(join(root, '.gitignore'), 'node_modules\n.env\n');
-  writeFileSync(join(app, 'package.json'), `${JSON.stringify({ name: project.name, version: project.version, dependencies: { expo: '~54.0.0', 'expo-dev-client': '~6.0.0', 'react-native': '0.81.4' } }, null, 2)}\n`);
+  const web = project.name === 'notes' ? { 'react-dom': '19.1.0', 'react-native-web': '~0.21.0' } : {};
+  writeFileSync(join(app, 'package.json'), `${JSON.stringify({ name: project.name, version: project.version, dependencies: { expo: '~54.0.0', 'expo-dev-client': '~6.0.0', 'react-native': '0.81.4', ...web } }, null, 2)}\n`);
+  // Installed dependencies, as far as the dev server page looks (it only reads their package.json). recipes is left
+  // uninstalled, so the page shows what it says when they're missing.
+  if (project.name !== 'recipes') {
+    for (const [name, version] of Object.entries({ expo: '54.0.12', 'expo-dev-client': '6.0.3', ...Object.fromEntries(Object.keys(web).map((key) => [key, '19.1.0'])) })) {
+      mkdirSync(join(app, 'node_modules', name), { recursive: true });
+      writeFileSync(join(app, 'node_modules', name, 'package.json'), JSON.stringify({ name, version }));
+    }
+  }
   // An app.json icon where the demo has one; pulse uses app.config.ts, so the dashboard falls back to a monogram.
   if (existsSync(join(HERE, `${project.name}.png`))) {
     mkdirSync(join(app, 'assets'));
@@ -316,8 +326,10 @@ script('xcrun', `[ "$1 $2 $3" = "devicectl list devices" ] || exit 1
 out=""; while [ $# -gt 0 ]; do [ "$1" = --json-output ] && out=$2; shift; done
 echo '{"result":{"devices":[{"identifier":"8A4F2C1E-5B6D-4E7F-9A0B-1C2D3E4F5A6B","connectionProperties":{"transportType":"localNetwork","pairingState":"paired"},"hardwareProperties":{"udid":"00008140-001A2D3E0C38801C","marketingName":"iPhone 16 Pro","deviceType":"iPhone"},"deviceProperties":{"name":"Alex’s iPhone"}}]}}' > "$out"
 `);
-// npx expo install, for setup's fixes: adds the package to package.json the way expo install would.
-script('npx', `node -e 'const f="package.json";const p=require(require("path").resolve(f));p.dependencies[process.argv[1]]="~6.0.0";require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\\n")' "\${@: -1}"; echo "› Installed \${@: -1}"
+// npx expo start runs the stand-in dev server (fake-expo.mjs); npx expo install, for setup's fixes, adds the package to
+// package.json the way expo install would.
+script('npx', `[ "$1 $2" = "expo start" ] && exec node ${JSON.stringify(join(HERE, 'fake-expo.mjs'))} "$@"
+node -e 'const f="package.json";const p=require(require("path").resolve(f));p.dependencies[process.argv[1]]="~6.0.0";require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\\n")' "\${@: -1}"; echo "› Installed \${@: -1}"
 `);
 script('pmset', `echo "Now drawing from 'AC Power'"; echo " -InternalBattery-0 (id=4653155)	100%; charged; 0:00 remaining present: true"\n`);
 const expo = (project) => ({
@@ -424,7 +436,15 @@ for (let tries = 0; tries < 50; tries += 1) {
 await post({ project: 'notes', profile: 'development', ref: 'feature/folders', label: 'feature/folders' });
 await new Promise((resolve) => { setTimeout(resolve, 1100); });
 await post({ project: 'pulse', profile: 'production', platform: 'android', ref: 'main', label: 'main', submit: true });
+// pulse's dev server, started "in a terminal" (not by the dashboard). Its metro.config.js has macbuild's line, so the
+// whole terminal shows on the dashboard; Expo's metro-config is stubbed, as the demo has no real Expo.
+const pulseDir = PROJECTS.find((project) => project.name === 'pulse').dir;
+writeFileSync(join(pulseDir, 'node_modules/expo/metro-config.js'), 'module.exports = { getDefaultConfig: () => ({}) };\n');
+addMetroHook(pulseDir, { home: HOME });
+const terminalExpo = spawn(process.execPath, [join(HERE, 'fake-expo.mjs'), 'expo', 'start', '--port', '8090'], { cwd: pulseDir, env: { ...ENV, CI: '' }, stdio: 'ignore' });
+// notes' dev server, running when the demo opens, as if someone had started it from their phone.
+await fetch(`http://127.0.0.1:${PORT}/api/dev/notes/start`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify({ connection: 'tailnet', cols: 96, rows: 30 }) });
 console.log(`macbuild demo: http://localhost:${PORT}  (data in ${DIR})`);
 console.log(`terminal setup: http://localhost:${PORT + 1}`);
-const stop = () => { terminal.stop(); server.kill(); process.exit(0); };
+const stop = () => { terminal.stop(); terminalExpo.kill('SIGINT'); server.kill(); process.exit(0); };
 process.on('SIGINT', stop); process.on('SIGTERM', stop);

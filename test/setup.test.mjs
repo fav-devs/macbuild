@@ -191,7 +191,12 @@ test('setup with an agent: finds apps, adds the chosen ones, fixes them, records
   view = await settled(flow);
   assert.equal(view.step, 'review');
   const fixes = view.fields.find((field) => field.id === 'apply');
-  assert.deepEqual(fixes.options.map((option) => `${option.tag}: ${option.label}`), ['recipes: Set the iOS bundle identifier']);
+  const hook = 'Show dev servers from a terminal in full (metro.config.js)';
+  assert.deepEqual(fixes.options.filter((option) => option.label !== hook).map((option) => `${option.tag}: ${option.label}`), ['recipes: Set the iOS bundle identifier']);
+  // macbuild's metro.config.js line is offered for each Expo app, but only ever unticked: it's the user's call.
+  const hooks = fixes.options.filter((option) => option.label === hook);
+  assert.deepEqual(hooks.map((option) => option.tag).sort(), ['field', 'notes', 'recipes']);
+  for (const option of hooks) assert.equal(fixes.value.includes(option.value), false);
   const answer = view.fields.find((field) => field.attach);
   assert.equal(answer.attach.option, '0');
   await flow.submit({ step: 'review', button: 'apply', values: { ...values(view), [answer.id]: 'com.acme.recipes' } });
@@ -236,9 +241,10 @@ test('without an agent, setup uses its own checks, and a failed fix stays on scr
   assert.equal(view.by, null);
   await flow.submit({ step: 'apps', values: { apps: view.fields[0].value, easjson: true } });
   assert.ok(existsSync(join(dir, 'Projects/pulse/eas.json')), 'eas.json was added where it was missing');
+  assert.equal(existsSync(join(dir, 'Developer/kitchen/apps/mobile/metro.config.js')), false, 'an unticked fix is not applied');
   await flow.submit({ step: 'tools', button: 'continue' });
   view = await settled(flow);
-  const labels = view.fields.find((field) => field.id === 'apply').options.map((option) => `${option.tag}: ${option.label}`);
+  const labels = view.fields.find((field) => field.id === 'apply').options.map((option) => `${option.tag}: ${option.label}`).filter((label) => !label.endsWith('(metro.config.js)'));
   assert.deepEqual(labels, ['recipes: Set the iOS bundle identifier', 'pulse: Install expo-dev-client']);
   const answer = view.fields.find((field) => field.attach);
   await flow.submit({ step: 'review', button: 'apply', values: { ...values(view), [answer.id]: 'not valid!' } });

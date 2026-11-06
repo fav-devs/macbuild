@@ -19,6 +19,8 @@ import { remoteApi } from '../lib/remote-api.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
 import { listAskChoices, parseAskChoice, startAsk } from '../lib/ask.mjs';
 import { SetupFlow } from '../lib/setup.mjs';
+import { DevServers, cleanLine as cleanDevLine } from '../lib/devserver.mjs';
+import { addMetroHook } from '../lib/metro-hook.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -677,6 +679,7 @@ async function system() {
     // missing: its project left projects.conf, so the project page can't turn the rule off; settings offers Remove.
     triggers: config().triggers.map((rule) => ({ ...rule, missing: !projects().some((known) => known.name === rule.project) })),
     settings: settingsView(),
+    dev: devServers.running().map(({ project, status, port, startedAt, prompt, external, terminal }) => ({ project, status, port, startedAt, prompt: Boolean(prompt), external: Boolean(external || terminal) })),
   };
 }
 
@@ -1198,11 +1201,81 @@ async function settings(req, res) {
   return json(res, 200, settingsView());
 }
 
+// Dev servers: `npx expo start` for each project, in a terminal this server holds (lib/devserver.mjs). The page streams
+// the terminal; `macbuild dev`, MCP and remote clients read the numbered log and press the same keys.
+const devServers = new DevServers({
+  dir: process.env.MACBUILD_DEV_DATA ?? join(dirname(DATA), 'dev'), projects, builds: allBuilds,
+  tailnetHost: () => { try { return tailnet.url ? new URL(tailnet.url).hostname : ''; } catch { return ''; } },
+});
+const devBy = (req) => who(req) ?? ({ cli: { name: 'Terminal (macbuild dev)' }, mcp: { name: 'Agent (MCP)' } }[req.headers['x-macbuild-client']] ?? null);
+const devQr = async (view) => {
+  const link = view.session && ['starting', 'running'].includes(view.session.status) ? view.session.urls?.app : '';
+  return { ...view, qr: link ? await QRCode.toString(link, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' }) : '' };
+};
+const devNumber = (value) => (value === null || value === '' || value === undefined ? undefined : Number.isFinite(Number(value)) ? Math.trunc(Number(value)) : undefined);
+function devStream(req, res, name) {
+  devServers.project(name);
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no', connection: 'keep-alive' });
+  const send = (event, data) => res.write(`${event ? `event: ${event}\n` : ''}data: ${data}\n\n`);
+  const { replay, unsubscribe, live } = devServers.subscribe(name, (type, payload) => {
+    if (type === 'data') send('', payload.toString('base64'));
+    else if (type === 'state') send('state', JSON.stringify(payload));
+    else if (type === 'exit') send('exit', String(payload));
+  });
+  for (const chunk of replay) send('', chunk.toString('base64'));
+  send('state', JSON.stringify(devServers.view(name).session));
+  if (!live) { unsubscribe(); return res.end(); }
+  const beat = setInterval(() => res.write(': keep-alive\n\n'), 20000);
+  req.on('close', () => { clearInterval(beat); unsubscribe(); });
+  return undefined;
+}
+async function devApi(req, res, url, parts) {
+  const [, , name, action] = parts;
+  try {
+    if (!name && req.method === 'GET') return json(res, 200, { servers: devServers.list(), running: devServers.running() });
+    if (!name) return json(res, 404, { error: 'not found' });
+    if (req.method === 'GET' && !action) return json(res, 200, await devQr(devServers.view(name)));
+    if (req.method === 'GET' && action === 'stream') return devStream(req, res, name);
+    if (req.method === 'GET' && action === 'log') {
+      return json(res, 200, await devServers.log(name, { since: devNumber(url.searchParams.get('since')), tail: devNumber(url.searchParams.get('tail')) ?? 200, wait: Math.min(60000, (devNumber(url.searchParams.get('wait')) ?? 0) * 1000) }));
+    }
+    if (req.method === 'GET' && action === 'log.txt') {
+      const id = url.searchParams.get('session') ?? '';
+      const log = devServers.rawLog(name, /^dev-[0-9a-z]+$/.test(id) ? id : '');
+      if (!log) return json(res, 404, { error: 'no log yet' });
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'content-disposition': `attachment; filename="${name}-${log.id}.log"` });
+      return res.end(log.text.split('\n').map((line) => cleanDevLine(line)).filter(Boolean).join('\n'));
+    }
+    if (req.method !== 'POST') return json(res, 404, { error: 'not found' });
+    const input = await body(req, 8192).catch(() => null);
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { error: 'Expected a JSON object.' });
+    const options = { connection: input.connection, clear: input.clear === true, port: devNumber(input.port), cols: devNumber(input.cols), rows: devNumber(input.rows) };
+    if (action === 'start') return json(res, 201, await devServers.start(name, options, devBy(req)));
+    if (action === 'restart') return json(res, 201, await devServers.restart(name, Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined && value !== false)), devBy(req)));
+    if (action === 'stop') return json(res, 200, devServers.stop(name));
+    if (action === 'takeover') return json(res, 201, await devServers.takeOver(name, {}, devBy(req)));
+    // Adds macbuild's line to the app's metro.config.js (the page asks first), so `npx expo start` in a terminal shows
+    // here in full from its next start. On the Mac only: remote clients can't edit files here.
+    if (action === 'hook') {
+      const project = devServers.project(name);
+      try { return json(res, 200, addMetroHook(project.dir, { expo: devServers.readiness(name).checks.some((check) => check.id === 'expo') })); }
+      catch (error) { return json(res, error.status ?? 400, { error: error.message, line: error.line }); }
+    }
+    if (action === 'input') return json(res, 200, Number.isInteger(input.choose) ? devServers.choose(name, input.choose) : devServers.input(name, { key: input.key, text: input.text, enter: input.enter !== false }));
+    if (action === 'resize') return json(res, 200, { resized: devServers.resize(name, devNumber(input.cols), devNumber(input.rows)) });
+    return json(res, 404, { error: 'not found' });
+  } catch (error) {
+    if (!error.status) console.error('dev', error);
+    return json(res, error.status ?? 500, { error: error.status ? error.message : 'server error' });
+  }
+}
+
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean);
   // a custom header cannot be sent cross-site without a preflight this server never approves
   if (req.method !== 'GET' && req.headers['x-macbuild'] !== '1') return json(res, 403, { error: 'forbidden' });
   if (url.pathname === '/api/system' && req.method === 'GET') return json(res, 200, await system());
+  if (parts[1] === 'dev') return devApi(req, res, url, parts);
   if (url.pathname === '/api/setup' && req.method === 'GET') return json(res, 200, await setupView());
   if (url.pathname === '/api/setup' && req.method === 'POST') return applySetup(req, res);
   if (url.pathname === '/api/setup/flow' && req.method === 'GET') return json(res, 200, await withQr(await setupFlow.view()));
@@ -1243,14 +1316,17 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/state' && req.method === 'GET') {
     const builds = reloadBuilds();
-    return json(res, 200, { projects: await Promise.all(projects().map(describe)), builds: builds.slice(0, 200).map(withEstimate) });
+    const dev = new Map(devServers.list().map((item) => [item.project, item]));
+    return json(res, 200, { projects: (await Promise.all(projects().map(describe))).map((project) => ({ ...project, dev: dev.get(project.name) ?? null })), builds: builds.slice(0, 200).map(withEstimate) });
   }
   // The build list alone, for the page that polls it: /api/state also runs git in every project.
   if (url.pathname === '/api/builds' && req.method === 'GET') return json(res, 200, { builds: reloadBuilds().slice(0, 200).map(withEstimate) });
   // Project names, icons and latest builds, without git: the sidebar asks for this on every page.
   if (url.pathname === '/api/projects' && req.method === 'GET') {
     const builds = allBuilds();
-    return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: builds.find((build) => build.project === project.name) ?? null })));
+    const dev = new Map(devServers.running().map((session) => [session.project, session]));
+    return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: builds.find((build) => build.project === project.name) ?? null,
+      dev: dev.has(project.name) ? { status: dev.get(project.name).status, port: dev.get(project.name).port, prompt: Boolean(dev.get(project.name).prompt), external: Boolean(dev.get(project.name).external || dev.get(project.name).terminal) } : null })));
   }
   if (parts[1] === 'projects' && parts[2] && parts[3] === 'commit') {
     const project = projects().find((known) => known.name === parts[2]);
@@ -1379,14 +1455,23 @@ function ota(req, res, url) {
   }
   res.writeHead(404); res.end();
 }
+// xterm.js for the dev server's terminal, from the dashboard's own dependencies: no CDN, so it works offline too.
+const VENDOR = { '/vendor/xterm.js': '@xterm/xterm/lib/xterm.js', '/vendor/xterm.css': '@xterm/xterm/css/xterm.css', '/vendor/addon-fit.js': '@xterm/addon-fit/lib/addon-fit.js' };
 function serve(res, pathname) {
+  if (VENDOR[pathname]) {
+    const file = join(HERE, 'node_modules', VENDOR[pathname]);
+    if (!existsSync(file)) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'content-type': TYPES[extname(file)], 'cache-control': 'max-age=86400' });
+    return createReadStream(file).pipe(res);
+  }
   const file = resolve(HERE, 'public', `.${pathname === '/' ? '/index.html' : pathname}`);
   if (!file.startsWith(join(HERE, 'public')) || !existsSync(file) || !statSync(file).isFile()) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-cache' });
   createReadStream(file).pipe(res);
 }
 
-const handleRemote = remoteApi({ projects, profiles: easProfiles, git, run, enqueue, enqueueUpdate, jobs: reloadBuilds, read, validId, logPath, cancel, download, submit: enqueueSubmission, json });
+const handleRemote = remoteApi({ projects, profiles: easProfiles, git, run, enqueue, enqueueUpdate, jobs: reloadBuilds, read, validId, logPath, cancel, download, submit: enqueueSubmission, json, dev: devServers });
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { devServers.stopAll(); devServers.save(); process.exit(0); });
 
 createServer(async (req, res) => {
   if (!knownHost(req.headers.host)) { res.writeHead(403, { 'content-type': 'text/plain' }); return res.end('unknown host\n'); }
@@ -1405,4 +1490,8 @@ createServer(async (req, res) => {
   console.log(`macbuild UI on 127.0.0.1:${PORT}`);
   recoverInterrupted().catch((error) => console.error('recover', error.message)).finally(() => { prune(); next(); });
   holdTailscale().catch((error) => console.error('tailscale', error.message));
+  // Dev servers someone started in a terminal, in a project's folder: found and followed every few seconds.
+  if (process.env.MACBUILD_DEV_SCAN !== '0') devServers.watch(Number(process.env.MACBUILD_DEV_SCAN_MS) || 4000);
+  // ...and those whose metro.config.js has macbuild's hook connect here, for all of their terminal.
+  devServers.listenHooks(process.env.MACBUILD_DEV_SOCKET ?? join(homedir(), '.local/share/macbuild/dev.sock'));
 });
