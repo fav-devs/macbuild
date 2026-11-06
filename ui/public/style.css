@@ -775,7 +775,6 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .dev-alert.info > .i { color: var(--accent); }
 .dev-alert code { font: 12px var(--mono); }
 .dev-keys-note { align-self: center; font-size: 12.5px; }
-.dev-term { overflow-x: auto; }
 .dev-ready li .btn { justify-self: start; margin-top: 6px; }
 .dev-alert p + p { margin-top: 4px; }
 .dev-alert div > div { margin-top: 6px; }
