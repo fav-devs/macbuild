@@ -13,6 +13,7 @@
 #   --output PATH      where the build goes (default: your Desktop)
 #   macbuild update <project> --profile production --channel production --message "Fix" --ref main [--environment production] [--platform ios|android|all]
 # Other commands: macbuild list | add <name> <path> | scan | doctor | setup [--cli|--web|--status] | builds | log | show | wait | mcp | commit <name> [--push] | ask [id|project] [--codex]
+#   macbuild dev [<name>|stop|log|key|send|answer|wait|status <name>]   Expo dev servers, run by the dashboard (macbuild dev --help)
 # Projects: ~/.config/macbuild/projects.conf (name|path). Settings: ~/.config/macbuild/env.
 # Build history (for agents): ~/.local/share/macbuild/builds/<id>/{meta.json,build.log}
 set -u
@@ -317,6 +318,7 @@ case "${1:-}" in
   show) history show "${2:-}" "${3:-}"; exit $?;;
   wait) shift; exec node "$ROOT/lib/wait.mjs" "$@";;
   mcp) exec node "$ROOT/lib/mcp.mjs";;
+  dev) shift; exec node "$ROOT/lib/dev-cli.mjs" "$@";;
   commit) shift; commit_cmd "$@"; exit $?;;
   ask) shift; exec node "$ROOT/lib/ask.mjs" "$@";;
 esac

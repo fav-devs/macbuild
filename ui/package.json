@@ -1,1 +1,1 @@
-{ "name": "macbuild-ui", "private": true, "type": "module", "dependencies": { "qrcode": "^1.5.4", "web-push": "^3.6.7" } }
+{ "name": "macbuild-ui", "private": true, "type": "module", "dependencies": { "@xterm/addon-fit": "^0.10.0", "@xterm/xterm": "^5.5.0", "qrcode": "^1.5.4", "web-push": "^3.6.7" } }

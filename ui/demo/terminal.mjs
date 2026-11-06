@@ -73,7 +73,7 @@ export function startTerminal({ port, env }) {
   const begin = ({ cols = 90, rows = 32, reset = false }) => {
     stop();
     const size = (value, low, high, fallback) => (Number.isInteger(value) && value >= low && value <= high ? value : fallback);
-    const args = [join(HERE, 'pty-bridge.py'), String(size(cols, 40, 240, 90)), String(size(rows, 12, 120, 32)), join(ROOT, 'bin/macbuild'), 'setup', ...(reset ? ['--reset'] : [])];
+    const args = [join(ROOT, 'lib/pty-bridge.py'), String(size(cols, 40, 240, 90)), String(size(rows, 12, 120, 32)), join(ROOT, 'bin/macbuild'), 'setup', ...(reset ? ['--reset'] : [])];
     const child = spawn('python3', ['-I', ...args], { env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' }, stdio: ['pipe', 'pipe', 'inherit'] });
     const session = { id: (current?.id ?? 0) + 1, child, chunks: [], listeners: new Set(), code: null };
     child.stdout.on('data', (chunk) => { session.chunks.push(chunk); for (const listener of session.listeners) listener.write(`data: ${chunk.toString('base64')}\n\n`); });

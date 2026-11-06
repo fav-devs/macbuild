@@ -4,6 +4,8 @@ Build your Expo apps for iOS and Android on your own Mac, with an EAS-style dash
 
 macbuild wraps `eas build --local`: it answers the signing prompts, builds any branch or commit from GitHub in a clean checkout, skips rebuilds when only JavaScript changed, and uploads to TestFlight or Google Play. No build credits, no queue.
 
+It also runs each app's Expo dev server. Start Metro from your phone, open the app with a QR code, and press Expo's keys from the dashboard. Agents can watch the same log and wait for the next bundle after they change code.
+
 <img src="docs/dashboard.png" alt="A project's overview: the build running now with its time left, latest builds, health, signing and working copy">
 
 <p>
@@ -112,7 +114,9 @@ macbuild scan                                # find Expo apps in ~/Documents, ~/
 macbuild commit myapp --push                 # split local git changes with T3, then push
 macbuild wait                                # block until the latest dashboard job finishes
 macbuild wait myapp --json                   # same, as one JSON object
-macbuild mcp                                 # stdio MCP: wait, show, builds, log
+macbuild mcp                                 # stdio MCP: wait, show, builds, log, and the dev server tools
+macbuild dev                                 # each app: can it run a dev server, is one running, its link
+macbuild dev myapp                           # start its dev server (npx expo start), wait until Metro is ready
 macbuild doctor                              # check the tools and logins builds need
 macbuild setup                               # the guided setup; --status for what's set up and missing
 ```
@@ -147,6 +151,7 @@ Install with `--ui` to run the dashboard at login, at `http://localhost:4180` on
 - Build automatically on every push, for each pull request, or every night; a newer push replaces a build that hasn't started
 - Post each build's status to its commit on GitHub, and a message to Slack or Discord
 - A page for each project's builds, branches, submissions, update channels, signing and devices, environment variable names, and build automation, with Expo's data read-only
+- Run each app's Expo dev server: start and stop it, open it on your phone with a QR code or in a browser, follow Expo's terminal live, press its keys and answer its questions
 - Charts for build activity, speed, success rate, app size and where the time goes
 - Disk cleanup for Xcode's build files, caches, old simulators and macbuild's own work folders
 - Your app's icon from `app.json`, your Mac's status in the sidebar, and push notifications when a build finishes
@@ -164,7 +169,7 @@ A few things the dashboard reads:
 
 ## Security
 
-**The web UI has no login.** Anyone who can reach it can start builds and download your IPAs. It listens on `127.0.0.1` and is meant to be shared only through your private tailnet. Never put it on the public internet, and don't turn on Tailscale Funnel for it. It answers only requests addressed to `localhost`, `127.0.0.1` or a `*.ts.net` name, which stops other websites from reaching it through DNS rebinding. To use another name, list it in `MACBUILD_UI_HOSTS` (comma-separated) in `~/Library/LaunchAgents/local.macbuild.ui.plist`.
+**The web UI has no login.** Anyone who can reach it can start builds, run dev servers and press their keys, and download your IPAs. It listens on `127.0.0.1` and is meant to be shared only through your private tailnet. Never put it on the public internet, and don't turn on Tailscale Funnel for it. It answers only requests addressed to `localhost`, `127.0.0.1` or a `*.ts.net` name, which stops other websites from reaching it through DNS rebinding. To use another name, list it in `MACBUILD_UI_HOSTS` (comma-separated) in `~/Library/LaunchAgents/local.macbuild.ui.plist`.
 
 Signing credentials stay with EAS and your Mac. Your Apple password, if you set one, is read from a file you choose. Environment variable values never reach the UI.
 
@@ -186,6 +191,7 @@ Signing credentials stay with EAS and your Mac. Your Apple password, if you set 
 | `~/.config/macbuild/setup.json` | How far setup got, what it found, and which signing commands finished |
 | `~/.local/share/macbuild/fingerprints` | The native fingerprint of each build, for `--skip-unchanged` |
 | `~/.local/share/macbuild/builds` | Web UI build history: the last 200 builds, with IPAs for the last 10 |
+| `~/.local/share/macbuild/dev` | Dev server logs: the last 20 sessions of each app, and how each was started |
 | `~/.cache/macbuild` | Work folders and checkouts. Safe to delete between builds. |
 | `~/Library/Logs/<name>-<platform>-build-<profile>.log` | The log of the last terminal build of each app, platform and profile |
 | `~/Library/Logs/macbuild-ui.log` | The web UI's own log |
@@ -222,6 +228,8 @@ After the maintainer publishes the package, the equivalent is `npm install -g @f
    macbuild server token create --name windows-agent \
      --projects parley,less --profiles development --scopes read,build,cancel
    ```
+
+   Add `dev` to the scopes to let the client start, stop and press keys in the Mac's dev servers. `read` alone lets it follow their logs.
 
    This prints a token **once**. Treat it as a password, transfer it privately, and never put it in chat, Git, or an agent prompt. The Mac stores only its hash. Tokens expire after 90 days by default (`--expires-days 1` through `365`). Administer them locally with `macbuild server token list` and `macbuild server token revoke ID`; revocation does not stop jobs already launched.
 3. On Windows, put only the token value in a temporary private file, then run PowerShell:
@@ -291,7 +299,7 @@ Configure the agent on the client with a stdio MCP server after connecting its r
 }
 ```
 
-Tools include `projects`, `commits`, `source`, `build`, `update`, `submit`, `builds`, `show`, `log`, `wait`, and `cancel`. Build tools use the client's working directory and the same source gates as the CLI. Release tools require `confirmRelease: true` **and** token permission; agents must obtain the user's release request rather than infer approval. A long `wait` does not block other MCP requests. The existing local `macbuild mcp` remains available with `--local` on the Mac.
+Tools include `projects`, `commits`, `source`, `build`, `update`, `submit`, `builds`, `show`, `log`, `wait`, and `cancel`, plus the [dev server tools](#dev-servers). Build tools use the client's working directory and the same source gates as the CLI. Release tools require `confirmRelease: true` **and** token permission; agents must obtain the user's release request rather than infer approval. A long `wait` does not block other MCP requests. The existing local `macbuild mcp` remains available with `--local` on the Mac.
 
 ## OTA updates
 
@@ -324,6 +332,42 @@ Publishing uses a separate checkout of a commit reachable from an origin branch,
 
 The CLI blocks until publication finishes and records the result in the same history used by `macbuild builds`, `show`, `log`, and the MCP read tools. For dashboard publishes, agents can use `macbuild wait <id>` rather than polling.
 
+## Dev servers
+
+<img src="docs/dev-server.png" alt="A project's dev server page: running on port 8081, the iOS bundle, the command, Expo's terminal with its keys, a QR code for the phone and the readiness checks">
+
+Each project has a **Dev server** page. The dashboard runs `npx expo start` for the app on the Mac, in a terminal it holds, so you can start Metro from your phone and close the laptop. The projects page shows, for every app, whether it can run one and whether one is running.
+
+- **Can it run?** The page checks that the app has `expo` in `package.json` and installed. If the dependencies are missing, it shows the install command for the app's package manager, at the workspace root in a monorepo. It also shows whether the app opens in a development build (`expo-dev-client`) or Expo Go, whether one has been built here, and whether it has web support.
+- **How the phone reaches it:**
+  - **Tailscale** (the default when it's on) puts the Mac's tailnet name in the link, so the phone can be anywhere.
+  - **Same Wi-Fi** uses the Mac's local address.
+  - **This Mac only** is for the Simulator, an emulator and web.
+  - **Tunnel** goes through Expo's ngrok tunnel.
+- **The command** is shown exactly as it runs, with a copy button: `npx expo start --port N` plus that one connection flag. Each app gets its own port, starting at 8081.
+- **Open it.** Once Metro is ready, the page shows a QR code and the link for the phone. Apps with web support get **Open web**, and with **Open the web app when it's ready** ticked, a tab opens as soon as Metro is up.
+- **Expo's terminal**, streamed live with colours. You can also switch to numbered plain text, copy the log or download it. Buttons press Expo's keys: reload, dev menu, debugger, iOS Simulator, Android, web, switch to Expo Go, all keys. A box sends typed text.
+- **Questions from Expo** appear above the terminal as buttons: Yes and No, or one button per option in a list. This covers installing ngrok for a tunnel and the tools menu.
+- **Bundles** show per platform: progress while Metro bundles, then the time and module count, or a failure and the last error.
+
+From a terminal or an agent, on the Mac or through a remote with the `dev` scope:
+
+```sh
+macbuild dev                         # every app: can it run, is it running, port and link
+macbuild dev myapp --open            # start it, wait until Metro is ready, open the web app or link
+macbuild dev myapp --lan --clear     # Same Wi-Fi, with Metro's cache cleared
+macbuild dev log myapp --follow      # Expo's output as numbered lines
+macbuild dev key myapp r             # press r (reload); also m, j, i, a, w, s, ?, enter, up, down, ctrl-c
+macbuild dev answer myapp yes        # answer Expo's question: yes, no, or an option's number
+macbuild dev wait myapp --since 120  # wait for the next bundle after line 120: exit 0 bundled, 1 failed, 124 timed out
+macbuild dev stop myapp
+macbuild dev myapp --here            # run expo start in this terminal instead, without the dashboard
+```
+
+`macbuild mcp` (and `macbuild --remote NAME mcp`) has the same operations as tools: `dev_servers`, `dev_status`, `dev_start`, `dev_stop`, `dev_log`, `dev_wait` and `dev_send`. Every log line has a number. An agent that edits code passes the last number it read to `dev_wait` and gets back the bundle that followed, or the error.
+
+It's Expo's terminal, not a shell. Keys and text go to `expo start` and nothing else, and the command can't be changed from the page or the API. Dev servers stop when the dashboard stops or restarts. Each one keeps its last 20 logs in `~/.local/share/macbuild/dev`. The first time a phone connects over Tailscale or Wi-Fi, macOS may ask whether Node can accept incoming connections: allow it.
+
 ## Develop
 
 Running CLI jobs parse their full script before starting, so editing `bin/macbuild` during a build cannot change that job's remaining commands. If the native build succeeds but a later step fails, the dashboard keeps the failure visible while allowing the saved store artifact to be downloaded or submitted without rebuilding. A submission already scheduled with Expo is not offered again.
@@ -331,12 +375,12 @@ Running CLI jobs parse their full script before starting, so editing `bin/macbui
 ```sh
 git clone https://github.com/fav-devs/macbuild.git && cd macbuild
 npm ci --prefix ui
-node ui/demo/demo.mjs        # the dashboard with sample projects and a build running, at http://localhost:4181 (setup: #/setup)
+node ui/demo/demo.mjs        # the dashboard with sample projects, a build and a dev server running, at http://localhost:4181 (setup: #/setup)
                              # and the terminal setup in a browser, at http://localhost:4182
 node --test test/*.test.mjs  # tests for the CLI and the web UI's server
 ```
 
-The demo uses stand-ins for `eas`, `gh`, GitHub and the setup agent (`ui/demo/fake-agent.mjs`, as `claude` and `codex`), so it runs on any machine and never touches your projects. The screenshots above come from it. CI runs the tests on Linux and macOS, plus `shellcheck` on the scripts. [AGENTS.md](AGENTS.md) has notes on how the pieces fit together.
+The demo uses stand-ins for `eas`, `gh`, GitHub, `expo start` (`ui/demo/fake-expo.mjs`) and the setup agent (`ui/demo/fake-agent.mjs`, as `claude` and `codex`), so it runs on any machine and never touches your projects. The screenshots above come from it. CI runs the tests on Linux and macOS, plus `shellcheck` on the scripts. [AGENTS.md](AGENTS.md) has notes on how the pieces fit together.
 
 ## License
 

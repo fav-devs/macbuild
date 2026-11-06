@@ -2,6 +2,7 @@
 // live work poll it, and a one-second ticker keeps elapsed times moving between polls. No framework: HTML strings, with
 // every value from the server passed through esc().
 const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const app = $('#app'); const side = $('#side'); const tabs = $('#tabs'); const tip = $('#tip');
 
 const ICONS = {
@@ -44,6 +45,12 @@ const ICONS = {
   x: '<path d="m6 6 12 12M18 6 6 18"/>',
   skip: '<circle cx="12" cy="12" r="9.2"/><path d="m8.2 8.5 3.5 3.5-3.5 3.5M12.8 8.5l3.5 3.5-3.5 3.5"/>',
   link: '<path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.4L11.6 6.4"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5l-2.7 2.7a4.5 4.5 0 0 0 6.4 6.4l1.5-1.5"/>',
+  play: '<path d="M7.5 4.8v14.4a.8.8 0 0 0 1.2.7l11.3-7.2a.8.8 0 0 0 0-1.4L8.7 4.1a.8.8 0 0 0-1.2.7z"/>',
+  stop: '<rect x="5.5" y="5.5" width="13" height="13" rx="2.2"/>',
+  terminal: '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="m7 9.5 3 2.5-3 2.5M12.5 15h4.5"/>',
+  copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v9A1.5 1.5 0 0 0 5 15.5h3.5"/>',
+  dot: '<circle cx="12" cy="12" r="3.2"/>',
+  globe: '<circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4M12 2.8c2.6 2.6 3.8 5.7 3.8 9.2s-1.2 6.6-3.8 9.2c-2.6-2.6-3.8-5.7-3.8-9.2S9.4 5.4 12 2.8"/>',
   broom: '<path d="M14.5 3.5 10 12M7 12.5h7.5l2 8H4.5z"/><path d="M8.5 16.5v4M12.5 16.5v4"/>',
 };
 const icon = (name, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ''}</svg>`;
@@ -132,7 +139,7 @@ function avatar(name, size = '') {
 
 // Server
 const shell = { projects: [], system: null };
-const routing = { token: 0, controller: new AbortController(), timers: [], first: true };
+const routing = { token: 0, controller: new AbortController(), timers: [], cleanups: [], first: true };
 async function get(path) {
   const { signal } = routing.controller;
   const response = await fetch(path, { cache: 'no-store', signal });
@@ -204,10 +211,10 @@ async function expoOf(name) {
 
 // Shell: the sidebar, with the Mac itself at the bottom, on wide screens; tabs on a phone.
 const SECTIONS = {
-  overview: ['Overview', 'home'], builds: ['Builds', 'layers'], branches: ['Branches', 'branch'], submissions: ['Submissions', 'send'],
+  overview: ['Overview', 'home'], builds: ['Builds', 'layers'], dev: ['Dev server', 'terminal'], branches: ['Branches', 'branch'], submissions: ['Submissions', 'send'],
   updates: ['OTA updates', 'radio'], channels: ['Channels', 'radio'], signing: ['Signing', 'shield'], environment: ['Environment', 'braces'], automation: ['Automation', 'bolt'],
 };
-const ALIASES = { activity: 'builds', insights: 'overview', devices: 'signing' };
+const ALIASES = { activity: 'builds', insights: 'overview', devices: 'signing', metro: 'dev', 'dev-server': 'dev' };
 function parseRoute() {
   const hash = location.hash || '#/';
   let match = hash.match(/^#\/build\/([0-9a-z-]+)$/);
@@ -236,7 +243,8 @@ function renderShell(where) {
     ${shell.projects.length ? `<div class="nav-label"><span>Projects</span><a href="#/new" title="New build" aria-label="New build">${icon('plus', 'sm')}</a></div>
     <nav class="nav" aria-label="Projects">${shell.projects.map((project) => {
       const last = project.lastBuild;
-      const mark = last && (active(last) || last.status === 'failed') ? statusIcon(last.status) : '';
+      const mark = last && (active(last) || last.status === 'failed') ? statusIcon(last.status)
+        : project.dev ? `<span class="led ${project.dev.prompt ? 'ask' : project.dev.status === 'running' ? 'idle' : 'busy'}" title="Dev server on port ${esc(project.dev.port)}"></span>` : '';
       const open = project.name === projectName;
       return `<a${on(open && where.page === 'project' && where.section === 'overview')} href="#/p/${esc(project.name)}">${avatar(project.name, 'sm')}<span>${esc(project.name)}</span>${mark}</a>
         ${open ? `<div class="sub">${Object.entries(SECTIONS).filter(([key]) => key !== 'overview').map(([key, [label, ic]]) => `<a${on(where.page === 'project' && where.section === key)} href="#/p/${esc(project.name)}/${key}">${icon(ic, 'sm')}<span>${label}</span></a>`).join('')}
@@ -257,6 +265,7 @@ function machineCard() {
     <div class="spec">${esc([machine.chip, machine.macos && `macOS ${machine.macos}`].filter(Boolean).join(' · ') || 'Builds run here')}</div>
     ${current ? `<a class="now" href="#/build/${esc(current.id)}">${avatar(current.project, 'xs')}<span><b>Building ${esc(current.project)}</b> · <span class="num" data-since="${current.startedAt}">${span(Date.now() - current.startedAt)}</span></span></a>`
       : `<div class="now">${icon('check', 'sm ok')}<span>Idle${system.queued ? `, ${system.queued} queued` : ''}</span></div>`}
+    ${(system.dev ?? []).map((item) => `<a class="now dev-now" href="#/p/${esc(item.project)}/dev"><span class="led ${item.prompt ? 'ask' : item.status === 'running' ? 'idle' : 'busy'}"></span><span><b>${esc(item.project)}</b> dev server · :${esc(item.port)}${item.prompt ? ' · <span class="warn">asking</span>' : ''}</span></a>`).join('')}
     <div class="meter"><div class="meter-label"><span>Disk</span><span>${gb(system.diskFree)} free</span></div><div class="bar ${used > 0.9 ? 'low' : ''}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>
   </div>`;
 }
@@ -701,7 +710,7 @@ async function projectsPage() {
       return `<a class="card pcard" href="#/p/${esc(project.name)}">
         <div class="pcard-top">${avatar(project.name, 'lg')}<div><b>${esc(project.name)}</b><small>${esc(project.repo || 'Local repository')}</small></div>${last ? buildBadge(last) : ''}</div>
         <div>${strip(mine)}<div class="strip-label"><span>${mine.length ? `Last ${Math.min(16, mine.length)} builds` : 'No builds yet'}</span><span>${last ? `Built ${ago(last.createdAt)}` : ''}</span></div></div>
-        ${kv([['Version', release ? `${esc(release.version)} <span class="faint">(${esc(release.number)})</span>` : '<span class="faint">—</span>'], ['Working copy', `${esc(project.branch || 'detached')}${project.dirty ? ` <span class="warn">· ${project.dirty} changed</span>` : ''}`]])}
+        ${kv([['Version', release ? `${esc(release.version)} <span class="faint">(${esc(release.number)})</span>` : '<span class="faint">—</span>'], ['Working copy', `${esc(project.branch || 'detached')}${project.dirty ? ` <span class="warn">· ${project.dirty} changed</span>` : ''}`], ['Dev server', devSummary(project.dev)]])}
       </a>`;
     }).join('')}
     <div class="card pcard add">${icon('plus')}<b>Add a project</b><p><code>macbuild add &lt;name&gt; &lt;path&gt;</code> or <code>macbuild scan</code></p></div></div>`;
@@ -783,7 +792,318 @@ function updateForm(data) {
     <p class="hint bad" id="ota-error" role="alert"></p>
   </form>`;
 }
+// Dev server: `npx expo start` for this project, run by the dashboard on the Mac. The terminal is Expo's own, streamed
+// from the Mac; keys, prompt answers and typed text go back to it. Agents read the same log through macbuild dev / MCP.
+const DEV_LIVE = ['starting', 'running', 'stopping'];
+const devLive = (session) => Boolean(session && DEV_LIVE.includes(session.status));
+const DEV_PLATFORMS = { ios: 'iOS', android: 'Android', web: 'Web' };
+const devPrefs = (() => { try { return JSON.parse(localStorage.getItem('macbuild.dev') || '{}'); } catch { return {}; } })();
+const saveDevPrefs = () => { try { localStorage.setItem('macbuild.dev', JSON.stringify(devPrefs)); } catch {} };
+const devDot = (session) => (session?.prompt ? 'ask' : session?.status === 'running' ? 'idle' : devLive(session) ? 'busy' : session?.status === 'failed' ? 'bad' : '');
+function devSummary(dev) {
+  if (!dev) return '<span class="faint">—</span>';
+  if (DEV_LIVE.includes(dev.status)) return `<span class="dev-inline"><span class="led ${dev.prompt ? 'ask' : dev.status === 'running' ? 'idle' : 'busy'}"></span>${dev.prompt ? 'Asking a question' : dev.status === 'running' ? 'Running' : 'Starting'} · :${esc(dev.port)}</span>`;
+  return dev.readiness.ok ? `<span>Can run <span class="faint">(${dev.readiness.passed}/${dev.readiness.total})</span></span>` : `<span class="warn">${esc(dev.readiness.summary)}</span>`;
+}
+// The phone link's host: the Mac's tailnet name, or the Wi-Fi address Expo put in the link.
+function devLinkHost(session) {
+  if (session?.host) return session.host;
+  const link = session?.urls?.app ?? '';
+  try {
+    const inner = new URL(link).searchParams.get('url');
+    return new URL(inner || link.replace(/^exp:/, 'http:')).hostname;
+  } catch { return ''; }
+}
+// Expo prints the web app on localhost. Opened from a phone or another computer, the same port on the Mac's name.
+function devWebLink(session) {
+  if (!session?.urls?.web) return '';
+  try {
+    const url = new URL(session.urls.web);
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) { const host = devLinkHost(session); if (host && host !== 'localhost') url.hostname = host; }
+    return url.href;
+  } catch { return session.urls.web; }
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0';
+  document.body.append(area); area.select();
+  const done = document.execCommand('copy'); area.remove();
+  return done;
+}
+let xtermLoading = null;
+function loadXterm() {
+  xtermLoading ??= new Promise((resolve, reject) => {
+    const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = '/vendor/xterm.css'; document.head.append(link);
+    const script = (src) => new Promise((done, fail) => { const tag = document.createElement('script'); tag.src = src; tag.onload = done; tag.onerror = fail; document.head.append(tag); });
+    script('/vendor/xterm.js').then(() => script('/vendor/addon-fit.js')).then(() => resolve(window.Terminal), (error) => { xtermLoading = null; reject(error); });
+  });
+  return xtermLoading;
+}
+function devTitle(session) {
+  if (!session) return ['Not running', 'Start it to run Metro for this app on this Mac.'];
+  const by = session.by?.name ? ` by ${esc(session.by.name)}` : '';
+  const how = `${session.target === 'Expo Go' ? 'Opens in Expo Go' : 'Opens in your development build'} · ${esc(({ tailnet: 'Tailscale', lan: 'same Wi-Fi', localhost: 'this Mac only', tunnel: 'tunnel' })[session.connection] ?? session.connection)}`;
+  if (session.prompt && devLive(session)) return ['Waiting for your answer', `Expo is asking something below. ${how}`];
+  if (session.status === 'running') return [`Running on port ${esc(session.port)}`, `${how} · started <span data-since="${session.startedAt}">${ago(session.startedAt)}</span>${by}`];
+  if (session.status === 'starting') return ['Starting Metro…', `${how} · port ${esc(session.port)}${by}`];
+  if (session.status === 'stopping') return ['Stopping…', 'Expo is closing its watchers.'];
+  const ran = session.stoppedAt && session.startedAt ? ` for ${span(session.stoppedAt - session.startedAt)}` : '';
+  if (session.status === 'failed') return ['Stopped with an error', `Last ran ${ago(session.startedAt)}${ran}${by}`];
+  return ['Not running', `Last ran ${ago(session.startedAt)}${ran}${by}`];
+}
+function devBundles(session) {
+  const items = Object.entries(session?.bundles ?? {});
+  if (!items.length || !devLive(session)) return '';
+  return `<div class="dev-bundles">${items.map(([platform, bundle]) => `<div class="dev-bundle ${bundle.failed ? 'bad' : bundle.done ? 'ok' : 'busy'}">
+    <b>${DEV_PLATFORMS[platform] ?? esc(platform)}</b>
+    ${bundle.failed ? '<span>Bundling failed</span>' : bundle.done ? `<span>Bundled in ${bundle.ms >= 1000 ? `${(bundle.ms / 1000).toFixed(1)} s` : `${bundle.ms} ms`}${bundle.modules ? ` <span class="faint">· ${plural(bundle.modules, 'module')}</span>` : ''}</span>`
+      : `<span class="dev-bar" role="progressbar" aria-valuenow="${Math.round(bundle.percent)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${bundle.percent}%"></i></span><span class="num">${Math.round(bundle.percent)}%</span>`}
+    <span class="faint" data-since="${bundle.at}">${ago(bundle.at)}</span></div>`).join('')}</div>`;
+}
+function devHero(view) {
+  const { session, readiness } = view;
+  const live = devLive(session);
+  const [title, sub] = devTitle(session);
+  const web = live ? devWebLink(session) : '';
+  const blocked = readiness.checks.find((check) => check.level === 'bad');
+  const chosen = devPrefs.connection && view.connections.some((item) => item.id === devPrefs.connection && item.available) ? devPrefs.connection : view.options.connection;
+  const actions = live
+    ? `${web ? `<a class="btn" href="${esc(web)}" target="_blank" rel="noopener">${icon('globe')}Open web</a>` : ''}<button class="btn" type="button" data-dev="restart" ${session.status === 'stopping' ? 'disabled' : ''}>${icon('rebuild')}Restart</button><button class="btn danger" type="button" data-dev="stop" ${session.status === 'stopping' ? 'disabled' : ''}>${icon('stop')}Stop</button>`
+    : `<button class="btn primary lg" type="button" data-dev="start" ${readiness.ok ? '' : 'disabled'}>${icon('play')}Start dev server</button>`;
+  return `<section class="card dev-hero ${devDot(session)}">
+    <div class="dev-hero-top">
+      <div class="dev-state"><span class="led ${devDot(session)}"></span><div><h2>${title}</h2><p class="muted">${sub}</p></div></div>
+      <div class="actions">${actions}</div>
+    </div>
+    ${devBundles(session)}
+    ${!live && session?.status === 'failed' && session.reason ? `<div class="dev-alert bad">${icon('alert')}<div><b>Expo stopped</b><p class="mono">${esc(session.reason)}</p></div></div>` : ''}
+    ${live && session.lastError ? `<div class="dev-alert bad">${icon('alert')}<div><b>Last error <span class="faint" data-since="${session.lastError.at}">${ago(session.lastError.at)}</span></b><p class="mono">${esc(session.lastError.text)}</p></div></div>` : ''}
+    ${!live && blocked ? `<div class="dev-alert">${icon('alert')}<div><b>${esc(readiness.summary)}</b><p>${esc(blocked.detail)}</p>${blocked.fix ? `<div class="dev-cmd"><code>${esc(blocked.fix)}</code><button class="btn sm ghost" type="button" data-copy="${esc(blocked.fix)}">${icon('copy')}Copy</button></div>` : ''}</div></div>` : ''}
+    ${!live && readiness.ok ? `<div class="dev-start">
+      <div class="field"><span>How your phone reaches it</span><div class="seg" role="radiogroup" aria-label="Connection">${view.connections.map((item) => `<button type="button" role="radio" aria-checked="${item.id === chosen}" data-conn="${item.id}" data-note="${esc(item.note)}" class="${item.id === chosen ? 'on' : ''}" ${item.available ? '' : 'disabled title="Tailscale isn’t running on this Mac"'}>${esc(item.label)}</button>`).join('')}</div>
+        <small id="dev-conn-note">${esc(view.connections.find((item) => item.id === chosen)?.note ?? '')}</small></div>
+      <div class="dev-checks">
+        <label class="dev-check"><input type="checkbox" class="switch" id="dev-clear"><span>Clear Metro’s cache</span></label>
+        ${readiness.web ? `<label class="dev-check"><input type="checkbox" class="switch" id="dev-open" ${devPrefs.open === false ? '' : 'checked'}><span>Open the web app when it’s ready</span></label>` : ''}
+      </div>
+    </div>` : ''}
+    <div class="dev-cmd main"><span class="faint">$</span><code id="dev-command">${esc(live ? session.command : view.command)}</code><button class="btn sm ghost" type="button" data-copy="${esc(live ? session.command : view.command)}" aria-label="Copy the command">${icon('copy')}Copy</button></div>
+  </section>`;
+}
+function devPrompt(session) {
+  const prompt = devLive(session) ? session.prompt : null;
+  if (!prompt) return '';
+  const actions = prompt.kind === 'confirm'
+    ? `<button class="btn ${prompt.default === 'yes' ? 'primary' : ''} sm" type="button" data-answer="y">Yes</button><button class="btn ${prompt.default === 'no' ? 'primary' : ''} sm" type="button" data-answer="n">No</button><span class="faint">Enter picks ${prompt.default === 'yes' ? 'Yes' : 'No'}</span>`
+    : prompt.kind === 'select'
+      ? prompt.options.map((option, index) => `<button class="btn sm ${option.selected ? 'on' : ''}" type="button" data-choose="${index}">${option.selected ? icon('right', 'xs') : ''}${esc(option.label)}</button>`).join('')
+      : `<form class="dev-send inline" id="dev-answer"><input name="answer" value="${esc(prompt.value ?? '')}" autocomplete="off" aria-label="Answer"><button class="btn primary sm">Answer</button></form>`;
+  return `<div class="dev-prompt" role="alert">${icon('alert')}<div class="dev-prompt-body"><b>Expo is asking</b><p>${esc(prompt.text)}</p><div class="dev-prompt-actions">${actions}</div></div></div>`;
+}
+function devPhone(view) {
+  const session = view.session;
+  if (!devLive(session) || !session.urls?.app) return '';
+  const local = session.connection === 'localhost';
+  return card(session.target === 'Expo Go' ? 'Open in Expo Go' : 'Open on your phone', 'phone', `<div class="card-body dev-phone">
+    ${view.qr && !local ? `<div class="dev-qr">${view.qr}</div>` : ''}
+    <p class="muted">${local ? 'This Mac only: a phone can’t reach it. Restart with Tailscale or Same Wi-Fi.' : `Scan with the iPhone’s camera, or tap below on the phone, to open it in ${session.target === 'Expo Go' ? 'Expo Go' : 'your development build'}.${session.connection === 'tailnet' ? ' The phone needs Tailscale on.' : session.connection === 'lan' ? ' The phone needs to be on the same Wi-Fi.' : ''}`}</p>
+    <div class="dev-link mono">${esc(session.urls.app)}</div>
+    <div class="dev-phone-actions"><a class="btn sm" href="${esc(session.urls.app)}">${icon('out')}Open link</a><button class="btn sm ghost" type="button" data-copy="${esc(session.urls.app)}">${icon('copy')}Copy</button></div>
+  </div>`);
+}
+function devReadiness(view) {
+  const ready = view.readiness;
+  const mark = { ok: icon('check', 'sm ok'), bad: icon('cross', 'sm bad'), warn: icon('alert', 'sm warn'), info: icon('dot', 'sm faint') };
+  return card('Can run a dev server', 'check', `<ul class="dev-ready">${ready.checks.map((check) => `<li data-level="${check.level}">${mark[check.level] ?? ''}<div><b>${esc(check.label)}</b><span>${fixHtml(check.detail)}</span>${check.fix ? `<code>${esc(check.fix)}</code>` : ''}</div></li>`).join('')}</ul>`,
+    `<span class="dev-score ${ready.level}">${ready.ok ? 'Yes' : 'Not yet'} · ${ready.passed}/${ready.total}</span>`);
+}
+function devAgents(name) {
+  const lines = [[`macbuild dev log ${name} --follow`, 'stream the log'], [`macbuild dev wait ${name}`, 'wait for the next bundle'], [`macbuild dev key ${name} r`, 'reload the app'], [`macbuild dev answer ${name} yes`, 'answer Expo']];
+  return card('From a terminal or an agent', 'terminal', `<div class="card-body dev-agents">${lines.map(([command, note]) => `<div><code>${esc(command)}</code><span class="faint">${note}</span></div>`).join('')}
+    <p class="muted">MCP: <code>macbuild mcp</code> has <code>dev_log</code>, <code>dev_wait</code> and <code>dev_send</code>. Log lines are numbered, so an agent reads on from the last one it saw.</p></div>`);
+}
+function devHistory(view) {
+  const past = view.history.filter((item) => !devLive(item) || item.id !== view.session?.id);
+  if (!past.length) return '';
+  return card('Earlier sessions', 'clock', `<div class="rows">${past.slice(0, 6).map((item) => `<a class="row compact" href="/api/dev/${esc(view.project)}/log.txt?session=${esc(item.id)}" download title="Download this session’s log">
+    <span class="led ${item.status === 'failed' ? 'bad' : ''}"></span><span class="main"><span class="title">${item.status === 'failed' ? 'Stopped with an error' : `Port ${esc(item.port)}`}</span><span class="meta">${ago(item.startedAt)}${item.stoppedAt ? `<span class="sep"></span>${span(item.stoppedAt - item.startedAt)}` : ''}${item.by?.name ? `<span class="sep"></span><span class="trunc">${esc(item.by.name)}</span>` : ''}</span></span>${icon('download', 'sm faint')}</a>`).join('')}</div>`);
+}
+function devOverview(view) {
+  const { session, readiness } = view;
+  const live = devLive(session);
+  const [title] = devTitle(session);
+  return `${kv([
+    ['Status', `<span class="dev-inline"><span class="led ${devDot(session)}"></span>${live ? title.replace(/ on port.*/, '') : 'Not running'}</span>`],
+    live ? ['Port', `<span class="mono">${esc(session.port)}</span>`] : ['Can run', readiness.ok ? `Yes <span class="faint">(${readiness.passed}/${readiness.total})</span>` : `<span class="warn">${esc(readiness.summary)}</span>`],
+    ['Opens in', readiness.devClient ? 'Development build' : 'Expo Go'],
+  ], 'list-kv')}<div class="card-body dev-mini">${live ? `<a class="btn sm" href="#/p/${esc(view.project)}/dev">${icon('terminal')}Terminal</a>${devWebLink(session) ? `<a class="btn sm" href="${esc(devWebLink(session))}" target="_blank" rel="noopener">${icon('globe')}Web</a>` : ''}`
+    : `<a class="btn sm ${readiness.ok ? 'primary' : ''}" href="#/p/${esc(view.project)}/dev">${icon('play')}${readiness.ok ? 'Start' : 'See what’s missing'}</a>`}</div>`;
+}
+let devPending = null; // a tab opened on Start, pointed at the web app once Metro is ready (a later window.open would be blocked)
+async function devSection(data, box) {
+  const name = data.name;
+  const token = routing.token;
+  let view = await get(`/api/dev/${encodeURIComponent(name)}`);
+  const live = devLive(view.session);
+  const mode = () => (live && devPrefs.view !== 'text' ? 'term' : 'text');
+  box.innerHTML = `<div id="dev-hero">${devHero(view)}</div>
+    <div class="cols main-side dev-cols">
+      <div class="stack">
+        <section class="card dev-term-card">
+          <div class="card-head"><h2>${icon('terminal')}${live ? 'Terminal' : view.session ? 'Last session’s log' : 'Terminal'}</h2>
+            <div class="dev-tools">${live ? `<div class="seg sm" role="tablist"><button type="button" data-view="term" class="${mode() === 'term' ? 'on' : ''}">Terminal</button><button type="button" data-view="text" class="${mode() === 'text' ? 'on' : ''}">Text</button></div>` : ''}
+              ${view.session ? `<button class="btn sm ghost" type="button" data-copylog>${icon('copy')}Copy log</button><a class="btn sm ghost" href="/api/dev/${esc(name)}/log.txt" download aria-label="Download the log">${icon('download')}</a>` : ''}</div></div>
+          <div id="dev-prompt">${devPrompt(view.session)}</div>
+          <div class="dev-term" id="dev-term" ${mode() === 'term' ? '' : 'hidden'}></div>
+          <pre class="log dev-text" id="dev-text" ${mode() === 'text' ? '' : 'hidden'}>${view.session ? '' : `<div class="dev-empty">${icon('terminal')}<b>Expo’s terminal shows here</b><span>Start the dev server to run <code>npx expo start</code> on ${esc(machineName())}.</span></div>`}</pre>
+          ${live ? `<div class="dev-keys" role="toolbar" aria-label="Expo keys">${view.keys.map((key) => `<button class="btn sm" type="button" data-key="${key.id}" title="Press ${esc(key.key)}"><kbd>${esc(key.key)}</kbd>${esc(key.label)}</button>`).join('')}</div>
+          <form class="dev-send" id="dev-send"><input id="dev-input" placeholder="Type to Expo and press Enter" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Type to Expo"><button class="btn sm" type="submit">Send</button>
+            <button class="btn sm ghost" type="button" data-key="enter" title="Enter">↵</button><button class="btn sm ghost" type="button" data-key="up" aria-label="Up">↑</button><button class="btn sm ghost" type="button" data-key="down" aria-label="Down">↓</button><button class="btn sm ghost" type="button" data-key="ctrl-c" title="Ctrl-C stops Expo">⌃C</button></form>` : ''}
+        </section>
+      </div>
+      <div class="stack" id="dev-side">${devPhone(view)}${devReadiness(view)}${devAgents(name)}${devHistory(view)}</div>
+    </div>`;
+  const redraw = async (session, fresh = false) => {
+    if (token !== routing.token) return;
+    const before = view.session;
+    view = fresh ? await get(`/api/dev/${encodeURIComponent(name)}`) : { ...view, session };
+    $('#dev-hero').innerHTML = devHero(view);
+    $('#dev-prompt').innerHTML = devPrompt(view.session);
+    if (fresh || before?.urls?.app !== view.session?.urls?.app) $('#dev-side').innerHTML = `${devPhone(view)}${devReadiness(view)}${devAgents(name)}${devHistory(view)}`;
+    const web = devWebLink(view.session);
+    if (devPending && view.session?.status === 'running' && web) { try { devPending.location.href = web; } catch {} devPending = null; }
+    if (devPending && !devLive(view.session)) { try { devPending.close(); } catch {} devPending = null; }
+  };
+  const send = async (body) => {
+    const result = await post(`/api/dev/${encodeURIComponent(name)}/input`, body);
+    if (result.error) flash(result.error, true);
+    else if (result.session) redraw(result.session);
+    return result;
+  };
+  // The plain text view: numbered lines, held open on the server until there are new ones.
+  let cursor = 0;
+  const text = $('#dev-text');
+  const addLines = (lines) => {
+    if (!lines.length) return;
+    const stick = text.scrollHeight - text.scrollTop - text.clientHeight < 40;
+    text.querySelector('.dev-empty')?.remove();
+    text.insertAdjacentHTML('beforeend', lines.map((line) => `<span data-n="${line.n}">${esc(line.text)}</span>`).join(''));
+    while (text.childElementCount > 3000) text.firstElementChild.remove();
+    if (stick) text.scrollTop = text.scrollHeight;
+  };
+  if (view.session) {
+    get(`/api/dev/${encodeURIComponent(name)}/log?tail=1500`).then((log) => {
+      addLines(log.lines); cursor = log.next;
+      if (!log.lines.length && !live) text.innerHTML = '<div class="dev-empty"><b>No output was saved for this session.</b></div>';
+      text.scrollTop = text.scrollHeight;
+      if (!live) return;
+      (async function follow() {
+        while (token === routing.token) {
+          const next = await get(`/api/dev/${encodeURIComponent(name)}/log?since=${cursor}&wait=20`).catch(() => null);
+          if (!next) { await new Promise((done) => { setTimeout(done, 2000); }); continue; }
+          addLines(next.lines); cursor = next.next;
+          if (!DEV_LIVE.includes(next.status)) break;
+          if (next.prompt && !next.lines.length) await new Promise((done) => { setTimeout(done, 1000); });
+        }
+      }());
+    }).catch(() => {});
+  }
+  // The terminal view: xterm.js on Expo's raw output, streamed from the Mac; what you type goes back to Expo.
+  let term = null;
+  if (live) {
+    const source = new EventSource(`/api/dev/${encodeURIComponent(name)}/stream`);
+    const pending = [];
+    source.onmessage = (event) => { const bytes = Uint8Array.from(atob(event.data), (c) => c.charCodeAt(0)); if (term) term.write(bytes); else pending.push(bytes); };
+    source.addEventListener('state', (event) => { const session = JSON.parse(event.data); if (session) redraw(session); });
+    source.addEventListener('exit', () => { source.close(); setTimeout(() => { if (token === routing.token) route(); }, 600); });
+    routing.cleanups.push(() => source.close());
+    loadXterm().then((Terminal) => {
+      if (token !== routing.token) return;
+      term = new Terminal({ fontFamily: 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace', fontSize: innerWidth < 600 ? 11 : 12.5, lineHeight: 1, scrollback: 5000, cursorBlink: false, convertEol: false,
+        theme: { background: '#111114', foreground: '#d6d6dc', cursor: '#7d7cf3', selectionBackground: '#3a3a5a', black: '#111114', brightBlack: '#5f606c', green: '#3ccb84', red: '#ff6a6d', yellow: '#f0a83a', blue: '#7d7cf3', cyan: '#6fd6ec', magenta: '#bf97ff' } });
+      const fit = new window.FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open($('#dev-term'));
+      for (const bytes of pending.splice(0)) term.write(bytes);
+      term.onData((data) => send({ text: data, enter: false }));
+      let sized = '';
+      const resize = () => {
+        if ($('#dev-term').hidden) return;
+        try { fit.fit(); } catch { return; }
+        const size = `${term.cols}x${term.rows}`;
+        if (size !== sized) { sized = size; post(`/api/dev/${encodeURIComponent(name)}/resize`, { cols: term.cols, rows: term.rows }); }
+      };
+      const observer = new ResizeObserver(() => { clearTimeout(observer.timer); observer.timer = setTimeout(resize, 120); });
+      observer.observe($('#dev-term'));
+      resize();
+      routing.cleanups.push(() => { observer.disconnect(); term.dispose(); });
+    }).catch(() => {
+      // No xterm (the dashboard's dependencies weren't installed): the text view does the job.
+      if (token !== routing.token) return;
+      $('#dev-term').hidden = true; text.hidden = false;
+      $('.dev-tools .seg')?.remove();
+    });
+  }
+  app.onclick = async (event) => {
+    const target = event.target.closest('button, a');
+    if (!target) return;
+    const conn = target.closest('[data-conn]');
+    if (conn && !conn.disabled) {
+      $$('[data-conn]').forEach((button) => { button.classList.toggle('on', button === conn); button.setAttribute('aria-checked', String(button === conn)); });
+      $('#dev-conn-note').textContent = conn.dataset.note;
+      devPrefs.connection = conn.dataset.conn; saveDevPrefs();
+      return;
+    }
+    if (target.dataset.copy !== undefined) { flash(await copyText(target.dataset.copy) ? 'Copied' : 'Couldn’t copy', false); return; }
+    if (target.dataset.copylog !== undefined) {
+      const log = await get(`/api/dev/${encodeURIComponent(name)}/log?tail=2000`);
+      flash(await copyText(log.lines.map((line) => line.text).join('\n')) ? `Copied ${plural(log.lines.length, 'line')}` : 'Couldn’t copy', false);
+      return;
+    }
+    if (target.dataset.view) {
+      devPrefs.view = target.dataset.view; saveDevPrefs();
+      $$('[data-view]').forEach((button) => button.classList.toggle('on', button === target));
+      $('#dev-term').hidden = target.dataset.view !== 'term'; text.hidden = target.dataset.view !== 'text';
+      if (target.dataset.view === 'text') text.scrollTop = text.scrollHeight; else term?.focus();
+      return;
+    }
+    if (target.dataset.key) { await send({ key: target.dataset.key }); if (!$('#dev-term').hidden) term?.focus(); return; }
+    if (target.dataset.answer) { await send({ key: target.dataset.answer }); return; }
+    if (target.dataset.choose !== undefined) { await send({ choose: Number(target.dataset.choose) }); return; }
+    const action = target.dataset.dev;
+    if (!action) return;
+    target.disabled = true;
+    if (action === 'start') {
+      const open = $('#dev-open')?.checked;
+      if (view.readiness.web) { devPrefs.open = Boolean(open); saveDevPrefs(); }
+      if (open) {
+        devPending = window.open('', '_blank');
+        try { devPending?.document.write(`<title>Starting ${esc(name)}…</title><meta name="color-scheme" content="light dark"><body style="font:15px system-ui;display:grid;place-items:center;height:90vh;color:#888">Starting Metro for ${esc(name)}…</body>`); } catch {}
+      }
+      const box = $('.dev-term-card');
+      const cols = Math.max(60, Math.min(160, Math.floor(((box?.clientWidth ?? 800) - 24) / 7.6)));
+      const result = await post(`/api/dev/${encodeURIComponent(name)}/start`, { connection: $('[data-conn].on')?.dataset.conn, clear: Boolean($('#dev-clear')?.checked), cols, rows: innerWidth < 600 ? 26 : 30 });
+      if (result.error) { flash(result.error, true); target.disabled = false; try { devPending?.close(); } catch {} devPending = null; return; }
+      route();
+      return;
+    }
+    const result = await post(`/api/dev/${encodeURIComponent(name)}/${action}`, {});
+    if (result.error) { flash(result.error, true); target.disabled = false; return; }
+    if (action === 'restart') route(); else redraw(result);
+  };
+  app.onsubmit = async (event) => {
+    event.preventDefault();
+    if (event.target.id === 'dev-send') {
+      const input = $('#dev-input');
+      const value = input.value;
+      const result = await send({ text: value });
+      if (!result.error) input.value = '';
+    }
+    if (event.target.id === 'dev-answer') await send({ text: new FormData(event.target).get('answer') ?? '' });
+  };
+}
 const PROJECT_SECTIONS = {
+  dev: (data, box) => devSection(data, box),
   async updates(data, box) {
     const updates = data.builds.filter((build) => build.action === 'update');
     const profiles = data.profiles.filter((profile) => profile.channel && !profile.developmentClient);
@@ -914,6 +1234,7 @@ const PROJECT_SECTIONS = {
         <div class="stack">
           ${card('Health', 'chart', `<div class="card-body">${strip(data.builds)}<div class="strip-label"><span>Last ${Math.min(16, data.builds.length)}</span></div></div>
             <dl class="stats3" style="border-top:1px solid var(--line)"><div><dt>Passed</dt><dd>${data.stats.total ? `${Math.round((data.stats.passed / data.stats.total) * 100)}<small>%</small>` : '—'}</dd></div><div><dt>Typical</dt><dd>${data.stats.median ? `${Math.round(data.stats.median / 60000)}<small>min</small>` : '—'}</dd></div><div><dt>This week</dt><dd>${week}</dd></div></dl>`)}
+          ${card('Dev server', 'terminal', `<div id="pdev">${skeleton(2)}</div>`, more(`#/p/${esc(name)}/dev`, 'Open'))}
           ${card('Signing', 'shield', kv([['Development profile', expiry(data.signing)], ['Devices', data.signing ? String(data.signing.devices) : '<span class="faint">—</span>'], ['App Store profile', expiry(data.storeSigning)]], 'list-kv'), more(`#/p/${esc(name)}/signing`, 'Details'))}
           ${card('Working copy', 'mac', `${kv([['Branch', esc(data.branch || 'detached')], ['Commit', `<span class="mono">${esc(data.commit)}</span>`], ['Changes', data.dirty ? `<span class="warn">${plural(data.dirty, 'file')}</span>` : 'Clean'], ['GitHub', data.behind ? `<span class="warn">${data.behind} behind</span>` : data.ahead ? `<span class="warn">${data.ahead} ahead</span>` : 'Up to date']], 'list-kv')}${data.dirty || data.ahead || commitLive(data) ? `<div class="card-body commit-box">${commitOffer(data)}</div>` : ''}`)}
           ${card('Automatic builds', 'bolt', data.triggers.length ? `<div class="rows">${data.triggers.map((rule) => `<a class="row compact" href="#/p/${esc(name)}/automation">${icon(rule.on === 'pr' ? 'pr' : rule.on === 'nightly' ? 'clock' : 'branch', 'sm faint')}<span class="main"><span class="title">${ruleTitle(rule)}</span><span class="meta">${ruleDetail(rule)}</span></span><span class="led ${rule.error ? '' : 'idle'}"></span></a>`).join('')}</div>`
@@ -928,6 +1249,7 @@ const PROJECT_SECTIONS = {
       route();
     };
     if (commitLive(data)) every(2500, async () => { const fresh = await get(`/api/projects/${encodeURIComponent(name)}`); if (!commitLive(fresh)) { route(); return 'stop'; } return undefined; });
+    get(`/api/dev/${encodeURIComponent(name)}`).then((dev) => { if ($('#pdev')) $('#pdev').innerHTML = devOverview(dev); }).catch(() => {});
     withExpo(name, $('#releases'), (expo) => {
       const last = expo.submissions[0];
       return kv([
@@ -1639,6 +1961,7 @@ async function route() {
   routing.token += 1;
   routing.controller.abort(); routing.controller = new AbortController();
   routing.timers.forEach(clearTimeout); routing.timers = [];
+  routing.cleanups.splice(0).forEach((cleanup) => { try { cleanup(); } catch {} });
   hideTip(); toast('');
   app.onclick = null; app.onchange = null; app.onsubmit = null; app.onkeydown = null;
   const where = parseRoute();

@@ -1,5 +1,5 @@
 // App shell and last-seen data for offline use; IPAs and install files always go to the network.
-const CACHE = 'macbuild-v7';
+const CACHE = 'macbuild-v8';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/apple-touch-icon.png'];
 self.addEventListener('install', (event) => { event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', (event) => {
@@ -7,7 +7,7 @@ self.addEventListener('activate', (event) => {
 });
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (event.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/ota/') || /app\.ipa|log\.txt|\/log$/.test(url.pathname)) return;
+  if (event.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/ota/') || url.pathname.startsWith('/api/dev/') || /app\.ipa|log\.txt|\/log$/.test(url.pathname)) return;
   event.respondWith(fetch(event.request).then((response) => {
     if (response.ok) { const copy = response.clone(); caches.open(CACHE).then((cache) => cache.put(event.request, copy)); }
     return response;
