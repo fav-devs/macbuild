@@ -678,7 +678,7 @@ async function system() {
     // missing: its project left projects.conf, so the project page can't turn the rule off; settings offers Remove.
     triggers: config().triggers.map((rule) => ({ ...rule, missing: !projects().some((known) => known.name === rule.project) })),
     settings: settingsView(),
-    dev: devServers.running().map(({ project, status, port, startedAt, prompt }) => ({ project, status, port, startedAt, prompt: Boolean(prompt) })),
+    dev: devServers.running().map(({ project, status, port, startedAt, prompt, external }) => ({ project, status, port, startedAt, prompt: Boolean(prompt), external: Boolean(external) })),
   };
 }
 
@@ -1252,6 +1252,7 @@ async function devApi(req, res, url, parts) {
     if (action === 'start') return json(res, 201, await devServers.start(name, options, devBy(req)));
     if (action === 'restart') return json(res, 201, await devServers.restart(name, Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined && value !== false)), devBy(req)));
     if (action === 'stop') return json(res, 200, devServers.stop(name));
+    if (action === 'takeover') return json(res, 201, await devServers.takeOver(name, {}, devBy(req)));
     if (action === 'input') return json(res, 200, Number.isInteger(input.choose) ? devServers.choose(name, input.choose) : devServers.input(name, { key: input.key, text: input.text, enter: input.enter !== false }));
     if (action === 'resize') return json(res, 200, { resized: devServers.resize(name, devNumber(input.cols), devNumber(input.rows)) });
     return json(res, 404, { error: 'not found' });
@@ -1317,7 +1318,7 @@ async function api(req, res, url) {
     const builds = allBuilds();
     const dev = new Map(devServers.running().map((session) => [session.project, session]));
     return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: builds.find((build) => build.project === project.name) ?? null,
-      dev: dev.has(project.name) ? { status: dev.get(project.name).status, port: dev.get(project.name).port, prompt: Boolean(dev.get(project.name).prompt) } : null })));
+      dev: dev.has(project.name) ? { status: dev.get(project.name).status, port: dev.get(project.name).port, prompt: Boolean(dev.get(project.name).prompt), external: Boolean(dev.get(project.name).external) } : null })));
   }
   if (parts[1] === 'projects' && parts[2] && parts[3] === 'commit') {
     const project = projects().find((known) => known.name === parts[2]);
@@ -1481,4 +1482,6 @@ createServer(async (req, res) => {
   console.log(`macbuild UI on 127.0.0.1:${PORT}`);
   recoverInterrupted().catch((error) => console.error('recover', error.message)).finally(() => { prune(); next(); });
   holdTailscale().catch((error) => console.error('tailscale', error.message));
+  // Dev servers someone started in a terminal, in a project's folder: found and followed every few seconds.
+  if (process.env.MACBUILD_DEV_SCAN !== '0') devServers.watch(Number(process.env.MACBUILD_DEV_SCAN_MS) || 4000);
 });

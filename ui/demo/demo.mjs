@@ -435,9 +435,11 @@ for (let tries = 0; tries < 50; tries += 1) {
 await post({ project: 'notes', profile: 'development', ref: 'feature/folders', label: 'feature/folders' });
 await new Promise((resolve) => { setTimeout(resolve, 1100); });
 await post({ project: 'pulse', profile: 'production', platform: 'android', ref: 'main', label: 'main', submit: true });
+// pulse's dev server, started "in a terminal" (not by the dashboard), for the dashboard to find and follow.
+const terminalExpo = spawn(process.execPath, [join(HERE, 'fake-expo.mjs'), 'expo', 'start', '--port', '8090'], { cwd: PROJECTS.find((project) => project.name === 'pulse').dir, env: ENV, stdio: 'ignore' });
 // notes' dev server, running when the demo opens, as if someone had started it from their phone.
 await fetch(`http://127.0.0.1:${PORT}/api/dev/notes/start`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify({ connection: 'tailnet', cols: 96, rows: 30 }) });
 console.log(`macbuild demo: http://localhost:${PORT}  (data in ${DIR})`);
 console.log(`terminal setup: http://localhost:${PORT + 1}`);
-const stop = () => { terminal.stop(); server.kill(); process.exit(0); };
+const stop = () => { terminal.stop(); terminalExpo.kill('SIGINT'); server.kill(); process.exit(0); };
 process.on('SIGINT', stop); process.on('SIGTERM', stop);

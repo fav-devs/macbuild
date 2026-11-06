@@ -350,6 +350,8 @@ Each project has a **Dev server** page. The dashboard runs `npx expo start` for 
 - **Questions from Expo** appear above the terminal as buttons: Yes and No, or one button per option in a list. This covers installing ngrok for a tunnel and the tools menu.
 - **Bundles** show per platform: progress while Metro bundles, then the time and module count, or a failure and the last error.
 
+**Started one yourself?** If you run `npx expo start` (or `npm start`, `yarn expo start`) in a project's folder, the dashboard finds it within a few seconds. It shows Metro's bundles, your app's `console` output and the connected phone, and offers the QR code. It can reload the app, open its dev menu or stop it. Expo's own output and other keys stay in your terminal, because another program can't read or type into it. **Run it here** stops it in your terminal and starts it in macbuild on the same port, with the whole terminal on the dashboard.
+
 From a terminal or an agent, on the Mac or through a remote with the `dev` scope:
 
 ```sh
@@ -361,6 +363,7 @@ macbuild dev key myapp r             # press r (reload); also m, j, i, a, w, s, 
 macbuild dev answer myapp yes        # answer Expo's question: yes, no, or an option's number
 macbuild dev wait myapp --since 120  # wait for the next bundle after line 120: exit 0 bundled, 1 failed, 124 timed out
 macbuild dev stop myapp
+macbuild dev takeover myapp          # one started in a terminal: stop it there, run it here on the same port
 macbuild dev myapp --here            # run expo start in this terminal instead, without the dashboard
 ```
 

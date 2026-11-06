@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DevServers, cleanLine, commandFor, parseLine, parsePrompt, readiness } from '../lib/devserver.mjs';
+import { DEV_COMMAND, DevServers, cleanLine, commandFor, elapsed, eventText, parseLine, parsePrompt, readiness } from '../lib/devserver.mjs';
 import { DEV_TOOLS, devMain } from '../lib/dev-cli.mjs';
 import { issueToken } from '../lib/remote-access.mjs';
 import { REMOTE_TOOLS } from '../lib/remote-mcp.mjs';
@@ -253,7 +253,7 @@ test('the dashboard runs dev servers for the page, macbuild dev, MCP and remote 
     assert.match(view.qr, /^<svg/);
     assert.equal(view.session.urls.web, `http://localhost:${view.session.port}`);
     const projectsList = (await call(port, '/api/projects')).json;
-    assert.deepEqual(projectsList.find((item) => item.name === 'habit').dev, { status: 'running', port: view.session.port, prompt: false });
+    assert.deepEqual(projectsList.find((item) => item.name === 'habit').dev, { status: 'running', port: view.session.port, prompt: false, external: false });
     assert.equal((await call(port, '/api/system')).json.dev[0].project, 'habit');
     assert.equal((await call(port, '/vendor/xterm.js')).status, existsSync(join(ROOT, 'ui/node_modules/@xterm/xterm')) ? 200 : 404);
 
@@ -334,4 +334,77 @@ test('agents get the same operations as MCP tools, locally and through a remote 
   assert.match(output, /habit\s+yes \(3\/3\)\s+running :8081\s+exp:\/\/x/);
   await assert.rejects(devMain(['habit', '--here'], transport, { write() {} }), /runs Expo in this terminal, on the Mac/);
   await assert.rejects(devMain(['habit', '--tailscale', '--lan'], transport, { write() {} }), /Choose one of/);
+});
+
+test('a dev server started in a terminal is recognised by its command, and Metro events read like Expo output', () => {
+  for (const command of ['node /a/node_modules/.bin/expo start', 'node /a/node_modules/expo/bin/cli start --port 8090', 'npm exec expo start', 'node /a/node_modules/.bin/react-native start', 'bun x expo start --tunnel']) assert.match(command, DEV_COMMAND, command);
+  for (const command of ['node expo-start.js', 'node /a/expo starter', 'node /a/node_modules/.bin/expo export']) assert.doesNotMatch(command, DEV_COMMAND, command);
+  assert.equal(elapsed('01:02'), 62);
+  assert.equal(elapsed('1-02:03:04'), 93784);
+  const builds = new Map();
+  assert.equal(cleanLine(eventText({ type: 'bundle_build_started', buildID: '1', bundleDetails: { platform: 'ios', entryFile: '/x/node_modules/expo-router/entry.js' } }, builds)), 'iOS Bundling   0.0%');
+  const progress = eventText({ type: 'bundle_transform_progressed', buildID: '1', transformedFileCount: 50, totalFileCount: 200 }, builds);
+  const session = { status: 'running', urls: {}, bundles: {}, lines: [] };
+  parseLine(session, cleanLine(progress), true);
+  assert.equal(session.bundles.ios.percent, 25);
+  assert.match(cleanLine(eventText({ type: 'bundle_build_done', buildID: '1' }, builds)), /^iOS Bundled \d+ms node_modules\/expo-router\/entry\.js \(200 modules\)$/);
+  assert.equal(eventText({ type: 'bundle_build_done', buildID: '1' }, builds), '', 'a build is reported once');
+  assert.equal(cleanLine(eventText({ type: 'client_log', level: 'warn', data: ['low battery', { level: 3 }] }, builds)), ' WARN  low battery {"level":3}');
+  assert.match(eventText({ type: 'bundling_error', error: { message: 'Unable to resolve module ./Missing' } }, builds), /^ERROR {2}Unable to resolve module/);
+  assert.equal(eventText({ type: 'something_new' }, builds), '');
+});
+
+test('the dashboard finds a dev server started in a terminal, follows it, reloads it, and can run it here instead', { timeout: 90000 }, async () => {
+  const { dir, env, projects } = home();
+  const port = 8300 + Math.floor(Math.random() * 400);
+  const terminal = (cwd, at = port) => spawn(process.execPath, [join(ROOT, 'ui/demo/fake-expo.mjs'), 'expo', 'start', '--port', String(at)], { cwd, env, stdio: 'ignore' });
+  const dev = new DevServers({ dir: join(dir, 'dev'), projects, builds: () => [], tailnetHost: () => 'mac.tail.ts.net', env });
+  const outside = terminal(dir, port + 1); // in no project's folder
+  let first = terminal(join(dir, 'code/habit'));
+  try {
+    const found = await until(async () => { await dev.scan(); const session = dev.view('habit').session; return session?.status === 'running' && session; });
+    assert.equal(found.external, true);
+    assert.equal(found.pid, first.pid);
+    assert.equal(found.port, port);
+    assert.equal(found.urls.app, `exp+habit://expo-development-client/?url=${encodeURIComponent(`http://mac.tail.ts.net:${port}`)}`);
+    assert.equal(found.urls.web, `http://localhost:${port}`);
+    assert.match(found.command, /expo start --port/);
+    assert.equal(dev.running().length, 1, 'the one outside every project folder is left alone');
+    assert.equal(dev.list().find((item) => item.project === 'habit').external, true);
+    await until(async () => { await dev.scan(); return dev.view('habit').session.devices.includes('iPhone 16 Pro'); });
+
+    // Reload goes through Metro's message socket; its bundle comes back through /events as an ordinary line.
+    const before = (await dev.log('habit', { tail: 1 })).next;
+    dev.input('habit', { key: 'r' });
+    const reloaded = await until(async () => {
+      const lines = (await dev.log('habit', { since: before })).lines.map((line) => line.text);
+      const asked = lines.indexOf('› Reloading apps (from macbuild)');
+      return asked >= 0 && lines.slice(asked + 1).some((text) => /^iOS Bundled \d+ms/.test(text));
+    });
+    assert.ok(reloaded, 'the reload was asked for, and its bundle came back as a line of its own');
+    assert.throws(() => dev.input('habit', { key: 'i' }), /runs in a terminal/);
+    assert.throws(() => dev.input('habit', { text: 'hello' }), /runs in a terminal/);
+    await assert.rejects(dev.start('habit'), /already running in a terminal/);
+    assert.equal(dev.resize('habit', 80, 24), false);
+
+    // Stop: as Ctrl-C in its terminal would.
+    dev.stop('habit');
+    await until(async () => { await dev.scan(); return first.exitCode !== null && dev.view('habit').session.status === 'stopped'; });
+    assert.equal(first.exitCode, 0);
+    assert.equal(dev.view('habit').history[0].external, true);
+    assert.ok((await dev.log('habit', { tail: 50 })).lines.some((line) => /iOS Bundled/.test(line.text)), 'its log is kept');
+
+    // Run it here: the terminal one stops and macbuild starts it on the same port.
+    first = terminal(join(dir, 'code/habit'));
+    await until(async () => { await dev.scan(); return dev.view('habit').session?.external && dev.view('habit').session.status === 'running'; });
+    const here = await dev.takeOver('habit', {}, { name: 'Sam' });
+    assert.equal(here.external, undefined);
+    assert.equal(here.port, port);
+    assert.equal(here.by.name, 'Sam');
+    assert.notEqual(first.exitCode, null);
+    await until(() => dev.view('habit').session.status === 'running');
+    await dev.scan();
+    assert.equal(dev.view('habit').session.external, undefined, 'macbuild’s own is not mistaken for one in a terminal');
+    assert.equal(dev.running().length, 1);
+  } finally { dev.stopAll(); outside.kill(); first.kill(); }
 });

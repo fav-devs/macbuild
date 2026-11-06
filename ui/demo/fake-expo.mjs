@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // A stand-in for `npx expo start`, for the demo and the tests: Expo's start screen and keys, a prompt for tunnels and
 // a list for shift+M, a bundle when a file in the project changes, and a small web page on its port, so the dashboard's
-// dev server page can be tried without Expo or a phone.
+// dev server page can be tried without Expo or a phone. Metro's endpoints too, for one started in a terminal:
+// /status, /events (bundles and console logs), /message (reload, devMenu) and /json/list (the connected phone).
 //   fake-expo.mjs start --port 8081 [--localhost|--tunnel] [--clear]
+import { createHash } from 'node:crypto';
 import { readFileSync, watch } from 'node:fs';
 import { createServer } from 'node:http';
 import { basename, join } from 'node:path';
@@ -67,18 +69,63 @@ function menu() {
   out();
   out('Logs for your project will appear below. Press Ctrl+C to exit.');
 }
+// Metro's WebSocket endpoints, just enough of the protocol for the dashboard: text frames each way, close, no ping.
+const sockets = { events: new Set(), message: new Set() };
+const frame = (text) => {
+  const data = Buffer.from(text);
+  const head = data.length < 126 ? Buffer.from([0x81, data.length]) : data.length < 65536 ? Buffer.from([0x81, 126, data.length >> 8, data.length & 255]) : Buffer.concat([Buffer.from([0x81, 127]), Buffer.from(BigInt(data.length).toString(16).padStart(16, '0'), 'hex')]);
+  return Buffer.concat([head, data]);
+};
+const emit = (event) => { for (const socket of sockets.events) socket.write(frame(JSON.stringify(event))); };
+const consoleLog = (text, level = 'log') => { out(` ${bold(level === 'error' ? 'ERROR' : 'LOG')}  ${text}`); emit({ type: 'client_log', level, data: [text] }); };
+let connected = false;
+function upgrade(req, socket) {
+  const path = new URL(req.url, 'http://metro').pathname.slice(1);
+  if (!sockets[path]) { socket.destroy(); return; }
+  const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  sockets[path].add(socket);
+  let buffer = Buffer.alloc(0);
+  socket.on('data', (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 2) {
+      const opcode = buffer[0] & 15; let length = buffer[1] & 127; let at = 2;
+      if (length === 126) { if (buffer.length < 4) return; length = buffer.readUInt16BE(2); at = 4; }
+      const mask = buffer[1] & 128 ? buffer.subarray(at, at + 4) : null;
+      if (mask) at += 4;
+      if (buffer.length < at + length) return;
+      const payload = Buffer.from(buffer.subarray(at, at + length));
+      if (mask) for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+      buffer = buffer.subarray(at + length);
+      if (opcode === 8) { socket.end(Buffer.from([0x88, 0])); return; }
+      if (opcode === 1 && path === 'message') {
+        let message = {};
+        try { message = JSON.parse(payload.toString()); } catch {}
+        if (message.method === 'reload') { out('› Reloading apps'); bundle('iOS', 1203); }
+        if (message.method === 'devMenu') out('› Toggling dev menu');
+      }
+    }
+  });
+  socket.on('close', () => sockets[path].delete(socket));
+  socket.on('error', () => sockets[path].delete(socket));
+}
 let bundling = Promise.resolve();
+let builds = 0;
 const bundle = (platform = 'iOS', modules = 1203, entry = 'node_modules/expo-router/entry.js') => {
   bundling = bundling.then(async () => {
+    const buildID = String((builds += 1));
+    emit({ type: 'bundle_build_started', buildID, bundleDetails: { platform: platform.toLowerCase(), entryFile: entry, bundleType: 'bundle', dev: true } });
     const steps = modules > 50 ? 14 : 3;
     for (let step = 0; step <= steps; step += 1) {
       const percent = (step / steps) * 100;
       const done = Math.round((percent / 100) * modules);
       const bar = '▓'.repeat(Math.round(percent / 6.25)).padEnd(16, '░');
       process.stdout.write(`\x1b[2K\x1b[1G${platform} Bundling ${bar} ${percent.toFixed(1).padStart(5)}% (${done}/${modules})`);
+      emit({ type: 'bundle_transform_progressed', buildID, transformedFileCount: done, totalFileCount: modules });
       await sleep(modules > 50 ? 140 : 60);
     }
     process.stdout.write(`\x1b[2K\x1b[1G${platform} Bundled ${modules > 50 ? 1834 : 118}ms ${entry} (${modules} modules)\n`);
+    emit({ type: 'bundle_build_done', buildID });
   });
   return bundling;
 };
@@ -133,10 +180,16 @@ async function start() {
   await sleep(700);
   server = createServer((req, res) => {
     if (req.url === '/status') { res.end('packager-status:running'); return; }
+    if (req.url === '/json/list') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(connected ? [{ id: '1-1', title: app?.name ?? slug, description: `com.acme.${slug}`, appId: `com.acme.${slug}`, deviceName: 'iPhone 16 Pro', type: 'node' }] : []));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(`<!doctype html><meta name="viewport" content="width=device-width"><title>${app?.name ?? slug}</title><body style="font:16px system-ui;display:grid;place-items:center;height:90vh;margin:0;background:#0f0f12;color:#ececf0"><div style="text-align:center"><h1 style="margin:0 0 6px">${app?.name ?? slug}</h1><p style="color:#a3a4ae;margin:0">Served by Metro on port ${port} (demo)</p></div>`);
   });
   server.on('error', (error) => { out(`\x1b[31mError: listen ${error.code}: address already in use :::${port}\x1b[39m`); process.exit(1); });
+  server.on('upgrade', upgrade);
   server.listen(port);
   qr();
   out();
@@ -144,18 +197,20 @@ async function start() {
   running();
   await sleep(1600);
   out(`${dim('iOS')} Connected to iPhone 16 Pro`);
+  connected = true;
   await bundle('iOS', 1203);
-  out(` ${bold('LOG')}  [${slug}] App mounted in 412 ms`);
+  consoleLog(`[${slug}] App mounted in 412 ms`);
   try {
     // A changed file in the project rebundles, the way Fast Refresh does: what an agent watches for after an edit.
     let last = 0;
     watch(process.cwd(), { recursive: true }, (_, file) => {
       if (!file || /node_modules|\.git|\.log$/.test(file) || Date.now() - last < 400) return;
       last = Date.now();
-      bundle('iOS', 1, file).then(() => out(` ${bold('LOG')}  [${slug}] Fast Refresh: ${file}`));
+      bundle('iOS', 1, file).then(() => consoleLog(`[${slug}] Fast Refresh: ${file}`));
     });
   } catch {}
 }
 start();
 process.on('SIGTERM', () => { server?.close(); process.exit(143); });
+process.on('SIGINT', () => { out(); out('› Stopping Metro'); server?.close(); process.exit(0); });
 process.on('SIGHUP', () => process.exit(129));

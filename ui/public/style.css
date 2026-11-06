@@ -771,3 +771,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .dev-alert > div { flex: 1; }
 .dev-text:has(.dev-empty) { height: 240px; }
 .dev-ready li[data-level="bad"] b { color: var(--red); }
+.dev-alert.info { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.dev-alert.info > .i { color: var(--accent); }
+.dev-alert code { font: 12px var(--mono); }
+.dev-keys-note { align-self: center; font-size: 12.5px; }
