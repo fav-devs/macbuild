@@ -350,7 +350,24 @@ Each project has a **Dev server** page. The dashboard runs `npx expo start` for 
 - **Questions from Expo** appear above the terminal as buttons: Yes and No, or one button per option in a list. This covers installing ngrok for a tunnel and the tools menu.
 - **Bundles** show per platform: progress while Metro bundles, then the time and module count, or a failure and the last error.
 
-**Started one yourself?** If you run `npx expo start` (or `npm start`, `yarn expo start`) in a project's folder, the dashboard finds it within a few seconds. It shows Metro's bundles, your app's `console` output and the connected phone, and offers the QR code. It can reload the app, open its dev menu or stop it. Expo's own output and other keys stay in your terminal, because another program can't read or type into it. **Run it here** stops it in your terminal and starts it in macbuild on the same port, with the whole terminal on the dashboard.
+**Started one yourself?** Keep running `npx expo start` (or `npm start`, `yarn expo start`) in your own terminal. With one line in the app's `metro.config.js`, the dashboard shows that whole terminal: Expo's output, the QR code, its questions, every key. Keys and answers from the dashboard reach Expo as if you'd typed them, and your terminal works exactly as before.
+
+```js
+try { require('@fav-devs/macbuild/metro').attach(); } catch {}
+```
+
+Add it with **Add to metro.config.js** on the Dev server page, `macbuild dev hook myapp`, or the optional fix in setup. Each one asks first. If the app has no `metro.config.js`, one is created with Expo's defaults.
+
+How it works:
+
+- **Loading:** Expo loads `metro.config.js` inside the `expo start` process, which is how the hook gets in.
+- **Finding macbuild:** the installer links macbuild into `~/.node_modules`, one of Node's own lookup folders, so the line works on your Mac without a dependency in the app.
+- **Everywhere else** (teammates, CI, EAS builds, `expo export`) the `require` fails quietly, or the hook sees it isn't `expo start` with the dashboard running, and nothing changes.
+- **Connection:** the hook talks to the dashboard over a socket in your home folder that only you can open. It reconnects if the dashboard restarts.
+- **Limits:** the two lines Expo prints before it loads the config ("Starting project at…") don't show. A `metro.config.ts` has to be edited by hand.
+- **Off switch:** `MACBUILD_ATTACH=0` turns the hook off.
+
+Without the line, the dashboard still finds a dev server started in a project's folder within a few seconds. It follows Metro instead: bundles, your app's `console` output, the connected phone and the QR code. It can reload the app, open its dev menu or stop it. Expo's own output and other keys stay in your terminal, since another program can't read or type into it. **Run it here** stops it there and starts it in macbuild on the same port.
 
 From a terminal or an agent, on the Mac or through a remote with the `dev` scope:
 
@@ -363,7 +380,8 @@ macbuild dev key myapp r             # press r (reload); also m, j, i, a, w, s, 
 macbuild dev answer myapp yes        # answer Expo's question: yes, no, or an option's number
 macbuild dev wait myapp --since 120  # wait for the next bundle after line 120: exit 0 bundled, 1 failed, 124 timed out
 macbuild dev stop myapp
-macbuild dev takeover myapp          # one started in a terminal: stop it there, run it here on the same port
+macbuild dev hook myapp              # add macbuild's line to metro.config.js: npx expo start in a terminal shows in full
+macbuild dev takeover myapp          # one started in a terminal without it: stop it there, run it here on the same port
 macbuild dev myapp --here            # run expo start in this terminal instead, without the dashboard
 ```
 

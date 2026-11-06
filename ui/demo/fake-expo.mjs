@@ -5,7 +5,8 @@
 // /status, /events (bundles and console logs), /message (reload, devMenu) and /json/list (the connected phone).
 //   fake-expo.mjs start --port 8081 [--localhost|--tunnel] [--clear]
 import { createHash } from 'node:crypto';
-import { readFileSync, watch } from 'node:fs';
+import { existsSync, readFileSync, watch } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { basename, join } from 'node:path';
 
@@ -177,6 +178,11 @@ async function start() {
   }
   if (args.includes('--clear')) out('› Clearing the Metro bundler cache');
   out('Starting Metro Bundler');
+  // Where Expo loads the app's metro.config.js: in this process, so macbuild's hook in it runs here too.
+  const config = ['metro.config.js', 'metro.config.cjs'].map((name) => join(process.cwd(), name)).find((file) => existsSync(file));
+  if (config) {
+    try { createRequire(config)(config); } catch (error) { if (!/expo\/metro-config/.test(error.message)) out(`\x1b[31mError loading ${config}: ${error.message}\x1b[39m`); }
+  }
   await sleep(700);
   server = createServer((req, res) => {
     if (req.url === '/status') { res.end('packager-status:running'); return; }

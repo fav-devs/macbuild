@@ -4,6 +4,7 @@
   "description": "Build Expo apps on your Mac from Windows, Linux, macOS, or an agent.",
   "type": "module",
   "bin": { "macbuild": "bin/macbuild.mjs" },
+  "exports": { "./metro": "./lib/metro.cjs", "./package.json": "./package.json" },
   "engines": { "node": ">=22" },
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/fav-devs/macbuild.git" },

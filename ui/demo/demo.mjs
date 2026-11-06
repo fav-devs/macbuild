@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { diagnose } from '../../lib/diagnose.mjs';
 import { startTerminal } from './terminal.mjs';
+import { addMetroHook } from '../../lib/metro-hook.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 0) || 4181;
@@ -435,8 +436,12 @@ for (let tries = 0; tries < 50; tries += 1) {
 await post({ project: 'notes', profile: 'development', ref: 'feature/folders', label: 'feature/folders' });
 await new Promise((resolve) => { setTimeout(resolve, 1100); });
 await post({ project: 'pulse', profile: 'production', platform: 'android', ref: 'main', label: 'main', submit: true });
-// pulse's dev server, started "in a terminal" (not by the dashboard), for the dashboard to find and follow.
-const terminalExpo = spawn(process.execPath, [join(HERE, 'fake-expo.mjs'), 'expo', 'start', '--port', '8090'], { cwd: PROJECTS.find((project) => project.name === 'pulse').dir, env: ENV, stdio: 'ignore' });
+// pulse's dev server, started "in a terminal" (not by the dashboard). Its metro.config.js has macbuild's line, so the
+// whole terminal shows on the dashboard; Expo's metro-config is stubbed, as the demo has no real Expo.
+const pulseDir = PROJECTS.find((project) => project.name === 'pulse').dir;
+writeFileSync(join(pulseDir, 'node_modules/expo/metro-config.js'), 'module.exports = { getDefaultConfig: () => ({}) };\n');
+addMetroHook(pulseDir, { home: HOME });
+const terminalExpo = spawn(process.execPath, [join(HERE, 'fake-expo.mjs'), 'expo', 'start', '--port', '8090'], { cwd: pulseDir, env: { ...ENV, CI: '' }, stdio: 'ignore' });
 // notes' dev server, running when the demo opens, as if someone had started it from their phone.
 await fetch(`http://127.0.0.1:${PORT}/api/dev/notes/start`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-macbuild': '1' }, body: JSON.stringify({ connection: 'tailnet', cols: 96, rows: 30 }) });
 console.log(`macbuild demo: http://localhost:${PORT}  (data in ${DIR})`);

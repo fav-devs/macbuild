@@ -28,6 +28,8 @@ if [ "$UNINSTALL" = 1 ]; then
   launchctl bootout "gui/$(id -u)/local.macbuild.ui" 2>/dev/null || true
   launchctl bootout "gui/$(id -u)/local.macbuild.menubar" 2>/dev/null || true
   rm -f "$PLIST" "$HOME/Library/LaunchAgents/local.macbuild.menubar.plist" "$HOME/.local/bin/macbuild" "$HOME/.local/bin/macbuild-menubar"
+  # The link that lets an app's metro.config.js find macbuild's hook; the line in the app then quietly does nothing.
+  [ -L "$HOME/.node_modules/@fav-devs/macbuild" ] && rm -f "$HOME/.node_modules/@fav-devs/macbuild"
   rm -rf "$HOME/.local/share/macbuild/macbuild-menubar.app"
   TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale; [ -x "$TS" ] || TS=$(command -v tailscale || true)
   [ -n "$TS" ] && "$TS" serve --https="$HTTPS" off 2>/dev/null || true
@@ -38,6 +40,11 @@ fi
 [ "$UNGUARD" = 1 ] && exit 0
 mkdir -p "$HOME/.local/bin" "$HOME/.config/macbuild"
 ln -sf "$HERE/bin/macbuild" "$HOME/.local/bin/macbuild"
+# require('@fav-devs/macbuild/metro') in an app's metro.config.js finds macbuild here (~/.node_modules is one of Node's
+# global folders), so a dev server started in a terminal can show on the dashboard without a dependency in the app.
+# Only ever a link: a real folder there is left alone.
+NODE_LINK="$HOME/.node_modules/@fav-devs/macbuild"
+if [ -L "$NODE_LINK" ] || [ ! -e "$NODE_LINK" ]; then mkdir -p "$HOME/.node_modules/@fav-devs" && ln -sfn "$HERE" "$NODE_LINK"; fi
 [ -f "$HOME/.config/macbuild/env" ] || cp "$HERE/env.example" "$HOME/.config/macbuild/env"
 chmod 600 "$HOME/.config/macbuild/env"
 # Someone at a terminal gets the guided setup, which asks which apps to add. Even with curl | bash, /dev/tty is them.

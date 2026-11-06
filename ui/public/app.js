@@ -802,7 +802,7 @@ const saveDevPrefs = () => { try { localStorage.setItem('macbuild.dev', JSON.str
 const devDot = (session) => (session?.prompt ? 'ask' : session?.status === 'running' ? 'idle' : devLive(session) ? 'busy' : session?.status === 'failed' ? 'bad' : '');
 function devSummary(dev) {
   if (!dev) return '<span class="faint">—</span>';
-  if (DEV_LIVE.includes(dev.status)) return `<span class="dev-inline"><span class="led ${dev.prompt ? 'ask' : dev.status === 'running' ? 'idle' : 'busy'}"></span>${dev.prompt ? 'Asking a question' : dev.status === 'running' ? (dev.external ? 'In a terminal' : 'Running') : 'Starting'} · :${esc(dev.port)}</span>`;
+  if (DEV_LIVE.includes(dev.status)) return `<span class="dev-inline"><span class="led ${dev.prompt ? 'ask' : dev.status === 'running' ? 'idle' : 'busy'}"></span>${dev.prompt ? 'Asking a question' : dev.status === 'running' ? (dev.external || dev.terminal ? 'In a terminal' : 'Running') : 'Starting'} · :${esc(dev.port)}</span>`;
   return dev.readiness.ok ? `<span>Can run <span class="faint">(${dev.readiness.passed}/${dev.readiness.total})</span></span>` : `<span class="warn">${esc(dev.readiness.summary)}</span>`;
 }
 // The phone link's host: the Mac's tailnet name, or the Wi-Fi address Expo put in the link.
@@ -844,6 +844,13 @@ function devTitle(session) {
   const by = session.by?.name ? ` by ${esc(session.by.name)}` : '';
   const how = `${session.target === 'Expo Go' ? 'Opens in Expo Go' : 'Opens in your development build'} · ${esc(({ tailnet: 'Tailscale', lan: 'same Wi-Fi', localhost: 'this Mac only', tunnel: 'tunnel' })[session.connection] ?? session.connection)}`;
   const devices = session.devices?.length ? ` · ${esc(session.devices.join(', '))} connected` : '';
+  if (session.hooked && devLive(session)) {
+    const where = `Started in a terminal · shown here in full · process ${esc(session.pid ?? '')}${devices}`;
+    if (session.prompt) return ['Waiting for your answer', `Expo is asking something below. ${where}`];
+    if (session.status === 'starting') return ['Starting in your terminal…', where];
+    if (session.status === 'stopping') return ['Stopping…', 'Asked it to stop, as Ctrl-C in its terminal would.'];
+    return [`Running in your terminal on port ${esc(session.port)}`, `${where} · started <span data-since="${session.startedAt}">${ago(session.startedAt)}</span>`];
+  }
   if (session.external && devLive(session)) {
     const where = `Started in a terminal · process ${esc(session.pid ?? '')}${devices}`;
     if (session.status === 'starting') return ['Starting in a terminal…', where];
@@ -856,7 +863,7 @@ function devTitle(session) {
   if (session.status === 'stopping') return ['Stopping…', 'Expo is closing its watchers.'];
   const ran = session.stoppedAt && session.startedAt ? ` for ${span(session.stoppedAt - session.startedAt)}` : '';
   if (session.status === 'failed') return ['Stopped with an error', `Last ran ${ago(session.startedAt)}${ran}${by}`];
-  if (session.external) return ['Not running', `Last ran in a terminal ${ago(session.startedAt)}${ran}`];
+  if (session.external || session.terminal) return ['Not running', `Last ran in a terminal ${ago(session.startedAt)}${ran}`];
   return ['Not running', `Last ran ${ago(session.startedAt)}${ran}${by}`];
 }
 function devBundles(session) {
@@ -876,7 +883,9 @@ function devHero(view) {
   const blocked = readiness.checks.find((check) => check.level === 'bad');
   const chosen = devPrefs.connection && view.connections.some((item) => item.id === devPrefs.connection && item.available) ? devPrefs.connection : view.options.connection;
   const stopping = session?.status === 'stopping' ? 'disabled' : '';
-  const actions = live && session.external
+  const actions = live && session.hooked
+    ? `${web ? `<a class="btn" href="${esc(web)}" target="_blank" rel="noopener">${icon('globe')}Open web</a>` : ''}<button class="btn danger" type="button" data-dev="stop" ${stopping}>${icon('stop')}Stop</button>`
+    : live && session.external
     ? `${web ? `<a class="btn" href="${esc(web)}" target="_blank" rel="noopener">${icon('globe')}Open web</a>` : ''}<button class="btn primary" type="button" data-dev="takeover" ${stopping}>${icon('terminal')}Run it here</button><button class="btn danger" type="button" data-dev="stop" ${stopping}>${icon('stop')}Stop</button>`
     : live
     ? `${web ? `<a class="btn" href="${esc(web)}" target="_blank" rel="noopener">${icon('globe')}Open web</a>` : ''}<button class="btn" type="button" data-dev="restart" ${stopping}>${icon('rebuild')}Restart</button><button class="btn danger" type="button" data-dev="stop" ${stopping}>${icon('stop')}Stop</button>`
@@ -887,7 +896,8 @@ function devHero(view) {
       <div class="actions">${actions}</div>
     </div>
     ${devBundles(session)}
-    ${live && session.external ? `<div class="dev-alert info">${icon('terminal')}<div><b>Found in a terminal</b><p>Someone ran <code>expo start</code> in this app’s folder. macbuild follows it: Metro’s bundles and your app’s logs show below, and you can reload the app or open its dev menu. Expo’s own output and other keys stay in that terminal. <b>Run it here</b> restarts it in macbuild on the same port, with the whole terminal here and on your phone.</p></div></div>` : ''}
+    ${live && session.external ? `<div class="dev-alert info">${icon('terminal')}<div><b>Found in a terminal</b><p>Someone ran <code>expo start</code> in this app’s folder. macbuild follows it: Metro’s bundles and your app’s logs show below, and you can reload the app or open its dev menu. Expo’s own output and other keys stay in that terminal. <b>Run it here</b> restarts it in macbuild on the same port, with the whole terminal here and on your phone.</p>
+      ${readiness.hook && !readiness.hook.present ? `<p>Or keep starting it in your terminal: with macbuild’s line in <code>${esc(readiness.hook.name)}</code>, all of it shows here from its next start.</p><div><button class="btn sm" type="button" data-dev="hook">${icon('plus')}Add to ${esc(readiness.hook.name)}</button></div>` : ''}</div></div>` : ''}
     ${!live && session?.status === 'failed' && session.reason ? `<div class="dev-alert bad">${icon('alert')}<div><b>Expo stopped</b><p class="mono">${esc(session.reason)}</p></div></div>` : ''}
     ${live && session.lastError ? `<div class="dev-alert bad">${icon('alert')}<div><b>Last error <span class="faint" data-since="${session.lastError.at}">${ago(session.lastError.at)}</span></b><p class="mono">${esc(session.lastError.text)}</p></div></div>` : ''}
     ${!live && blocked ? `<div class="dev-alert">${icon('alert')}<div><b>${esc(readiness.summary)}</b><p>${esc(blocked.detail)}</p>${blocked.fix ? `<div class="dev-cmd"><code>${esc(blocked.fix)}</code><button class="btn sm ghost" type="button" data-copy="${esc(blocked.fix)}">${icon('copy')}Copy</button></div>` : ''}</div></div>` : ''}
@@ -926,7 +936,8 @@ function devPhone(view) {
 function devReadiness(view) {
   const ready = view.readiness;
   const mark = { ok: icon('check', 'sm ok'), bad: icon('cross', 'sm bad'), warn: icon('alert', 'sm warn'), info: icon('dot', 'sm faint') };
-  return card('Can run a dev server', 'check', `<ul class="dev-ready">${ready.checks.map((check) => `<li data-level="${check.level}">${mark[check.level] ?? ''}<div><b>${esc(check.label)}</b><span>${fixHtml(check.detail)}</span>${check.fix ? `<code>${esc(check.fix)}</code>` : ''}</div></li>`).join('')}</ul>`,
+  const hookButton = (check) => (check.id === 'hook' && ready.hook && !ready.hook.present ? `<button class="btn sm" type="button" data-dev="hook">${icon('plus')}Add to ${esc(ready.hook.name)}</button>` : '');
+  return card('Can run a dev server', 'check', `<ul class="dev-ready">${ready.checks.map((check) => `<li data-level="${check.level}">${check.id === 'hook' ? icon('terminal', `sm ${ready.hook?.present ? 'ok' : 'faint'}`) : mark[check.level] ?? ''}<div><b>${esc(check.label)}</b><span>${fixHtml(check.detail)}</span>${check.fix ? `<code>${esc(check.fix)}</code>` : ''}${hookButton(check)}</div></li>`).join('')}</ul>`,
     `<span class="dev-score ${ready.level}">${ready.ok ? 'Yes' : 'Not yet'} · ${ready.passed}/${ready.total}</span>`);
 }
 function devAgents(name, session) {
@@ -1025,11 +1036,12 @@ async function devSection(data, box) {
   }
   // The terminal view: xterm.js on Expo's raw output, streamed from the Mac; what you type goes back to Expo.
   let term = null;
+  let termResize = () => {};
   if (live) {
     const source = new EventSource(`/api/dev/${encodeURIComponent(name)}/stream`);
     const pending = [];
     source.onmessage = (event) => { const bytes = Uint8Array.from(atob(event.data), (c) => c.charCodeAt(0)); if (term) term.write(bytes); else pending.push(bytes); };
-    source.addEventListener('state', (event) => { const session = JSON.parse(event.data); if (session) redraw(session); });
+    source.addEventListener('state', (event) => { const session = JSON.parse(event.data); if (!session) return; const width = view.session?.cols; redraw(session); if (session.cols !== width) termResize(); });
     source.addEventListener('exit', () => { source.close(); setTimeout(() => { if (token === routing.token) route(); }, 600); });
     routing.cleanups.push(() => source.close());
     loadXterm().then((Terminal) => {
@@ -1042,12 +1054,15 @@ async function devSection(data, box) {
       for (const bytes of pending.splice(0)) term.write(bytes);
       if (!view.session.external) term.onData((data) => send({ text: data, enter: false })); // one in a terminal takes keys there
       let sized = '';
+      // One in your own terminal keeps that terminal's width (macbuild can't resize it), so lines break where they do there.
       const resize = () => {
         if ($('#dev-term').hidden) return;
         try { fit.fit(); } catch { return; }
+        if (view.session?.terminal) { if (view.session.cols && term.cols !== view.session.cols) term.resize(view.session.cols, term.rows); return; }
         const size = `${term.cols}x${term.rows}`;
         if (size !== sized) { sized = size; post(`/api/dev/${encodeURIComponent(name)}/resize`, { cols: term.cols, rows: term.rows }); }
       };
+      termResize = resize;
       const observer = new ResizeObserver(() => { clearTimeout(observer.timer); observer.timer = setTimeout(resize, 120); });
       observer.observe($('#dev-term'));
       resize();
@@ -1089,7 +1104,17 @@ async function devSection(data, box) {
     if (target.dataset.choose !== undefined) { await send({ choose: Number(target.dataset.choose) }); return; }
     const action = target.dataset.dev;
     if (!action) return;
-    if (view.session?.external && action === 'stop' && !confirm('Stop the dev server running in its terminal? It stops as if you pressed Ctrl-C there.')) return;
+    if ((view.session?.external || view.session?.hooked) && action === 'stop' && !confirm('Stop the dev server running in its terminal? It stops as if you pressed Ctrl-C there.')) return;
+    if (action === 'hook') {
+      const hook = view.readiness.hook;
+      if (!confirm(`Add this line to ${name}’s ${hook.name}?\n\n${hook.line}\n\nFrom its next start, npx expo start in a terminal shows here in full, and keys from here reach it. Without macbuild (teammates, CI, EAS builds) the line does nothing.`)) return;
+      target.disabled = true;
+      const result = await post(`/api/dev/${encodeURIComponent(name)}/hook`, {});
+      if (result.error) { flash(result.error, true); target.disabled = false; return; }
+      await route();
+      flash(result.changed ? `${result.created ? 'Created' : 'Added to'} ${result.file.split('/').pop()}. Restart npx expo start in your terminal.` : 'It’s already there.');
+      return;
+    }
     if (action === 'takeover' && !confirm(`Stop it in its terminal and run it here on port ${view.session?.port}? Phones reconnect when it’s back.`)) return;
     target.disabled = true;
     if (action === 'start') {

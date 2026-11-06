@@ -70,6 +70,7 @@ In `say`, tell the user where each app stands, for example: "Notes is ready. Rec
 | `set_config` | `app`, `key`: `ios.bundleIdentifier` or `android.package`, `value` or `answer` | Sets `expo.<key>` in the app's `app.json`. Only for apps with an `app.json`; for values set in `app.config.*`, explain in `say` instead. |
 | `link_eas` | `app` | Runs `eas init --non-interactive --force` in the app folder, which creates or links the EAS project and writes its ID to `app.json`. |
 | `install_dev_client` | `app` | Runs `npx expo install expo-dev-client` in the app folder. |
+| `add_metro_hook` | `app` | Adds macbuild's one line to the app's `metro.config.js` (or creates one with Expo's defaults), so a dev server started with `npx expo start` shows on the dashboard in full. Optional, never needed to build: suggest it only for Expo apps, and only as a convenience. |
 | `set_setting` | `key`: `MACBUILD_APPLE_ID`, `MACBUILD_DEVICE`, `MACBUILD_SIMULATOR`, `MACBUILD_ANDROID_DEVICE` or `MACBUILD_NODE`, `value` or `answer` | Saves the setting in `~/.config/macbuild/env`. |
 
 `app` is the macbuild name of the app (from `apps`). Use null for fields an action doesn't take. `why` is a short reason shown under the fix: "EAS asks for it otherwise".

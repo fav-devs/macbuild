@@ -20,6 +20,7 @@ import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mj
 import { listAskChoices, parseAskChoice, startAsk } from '../lib/ask.mjs';
 import { SetupFlow } from '../lib/setup.mjs';
 import { DevServers, cleanLine as cleanDevLine } from '../lib/devserver.mjs';
+import { addMetroHook } from '../lib/metro-hook.mjs';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -678,7 +679,7 @@ async function system() {
     // missing: its project left projects.conf, so the project page can't turn the rule off; settings offers Remove.
     triggers: config().triggers.map((rule) => ({ ...rule, missing: !projects().some((known) => known.name === rule.project) })),
     settings: settingsView(),
-    dev: devServers.running().map(({ project, status, port, startedAt, prompt, external }) => ({ project, status, port, startedAt, prompt: Boolean(prompt), external: Boolean(external) })),
+    dev: devServers.running().map(({ project, status, port, startedAt, prompt, external, terminal }) => ({ project, status, port, startedAt, prompt: Boolean(prompt), external: Boolean(external || terminal) })),
   };
 }
 
@@ -1253,6 +1254,13 @@ async function devApi(req, res, url, parts) {
     if (action === 'restart') return json(res, 201, await devServers.restart(name, Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined && value !== false)), devBy(req)));
     if (action === 'stop') return json(res, 200, devServers.stop(name));
     if (action === 'takeover') return json(res, 201, await devServers.takeOver(name, {}, devBy(req)));
+    // Adds macbuild's line to the app's metro.config.js (the page asks first), so `npx expo start` in a terminal shows
+    // here in full from its next start. On the Mac only: remote clients can't edit files here.
+    if (action === 'hook') {
+      const project = devServers.project(name);
+      try { return json(res, 200, addMetroHook(project.dir, { expo: devServers.readiness(name).checks.some((check) => check.id === 'expo') })); }
+      catch (error) { return json(res, error.status ?? 400, { error: error.message, line: error.line }); }
+    }
     if (action === 'input') return json(res, 200, Number.isInteger(input.choose) ? devServers.choose(name, input.choose) : devServers.input(name, { key: input.key, text: input.text, enter: input.enter !== false }));
     if (action === 'resize') return json(res, 200, { resized: devServers.resize(name, devNumber(input.cols), devNumber(input.rows)) });
     return json(res, 404, { error: 'not found' });
@@ -1318,7 +1326,7 @@ async function api(req, res, url) {
     const builds = allBuilds();
     const dev = new Map(devServers.running().map((session) => [session.project, session]));
     return json(res, 200, projects().map((project) => ({ name: project.name, icon: Boolean(iconPath(project)), lastBuild: builds.find((build) => build.project === project.name) ?? null,
-      dev: dev.has(project.name) ? { status: dev.get(project.name).status, port: dev.get(project.name).port, prompt: Boolean(dev.get(project.name).prompt), external: Boolean(dev.get(project.name).external) } : null })));
+      dev: dev.has(project.name) ? { status: dev.get(project.name).status, port: dev.get(project.name).port, prompt: Boolean(dev.get(project.name).prompt), external: Boolean(dev.get(project.name).external || dev.get(project.name).terminal) } : null })));
   }
   if (parts[1] === 'projects' && parts[2] && parts[3] === 'commit') {
     const project = projects().find((known) => known.name === parts[2]);
@@ -1484,4 +1492,6 @@ createServer(async (req, res) => {
   holdTailscale().catch((error) => console.error('tailscale', error.message));
   // Dev servers someone started in a terminal, in a project's folder: found and followed every few seconds.
   if (process.env.MACBUILD_DEV_SCAN !== '0') devServers.watch(Number(process.env.MACBUILD_DEV_SCAN_MS) || 4000);
+  // ...and those whose metro.config.js has macbuild's hook connect here, for all of their terminal.
+  devServers.listenHooks(process.env.MACBUILD_DEV_SOCKET ?? join(homedir(), '.local/share/macbuild/dev.sock'));
 });

@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEV_COMMAND, DevServers, cleanLine, commandFor, elapsed, eventText, parseLine, parsePrompt, readiness } from '../lib/devserver.mjs';
 import { DEV_TOOLS, devMain } from '../lib/dev-cli.mjs';
+import { HOOK_LINE, addMetroHook, linkForNode, metroHook } from '../lib/metro-hook.mjs';
 import { issueToken } from '../lib/remote-access.mjs';
 import { REMOTE_TOOLS } from '../lib/remote-mcp.mjs';
 
@@ -37,6 +38,8 @@ function home() {
     for (const name of installed) json(join(dir, path, 'node_modules', name, 'package.json'), { name, version: name === 'expo' ? '54.0.12' : '1.0.0' });
   };
   app('code/habit', { expo: '~54.0.0', 'expo-dev-client': '~6.0.0', 'react-native-web': '~0.21.0', 'react-dom': '19.1.0' });
+  // What metro.config.js needs from Expo: enough for the stand-in to load it the way Expo does.
+  writeFileSync(join(dir, 'code/habit/node_modules/expo/metro-config.js'), 'module.exports = { getDefaultConfig: () => ({ resolver: {} }) };\n');
   app('code/go', { expo: '~54.0.0' });
   mkdirSync(join(dir, 'code/mono/.git'), { recursive: true });
   writeFileSync(join(dir, 'code/mono/pnpm-lock.yaml'), '');
@@ -407,4 +410,95 @@ test('the dashboard finds a dev server started in a terminal, follows it, reload
     assert.equal(dev.view('habit').session.external, undefined, 'macbuild’s own is not mistaken for one in a terminal');
     assert.equal(dev.running().length, 1);
   } finally { dev.stopAll(); outside.kill(); first.kill(); }
+});
+
+test('the metro.config.js line: added on request, once, and macbuild linked where Node finds it', () => {
+  const { dir } = home();
+  const habit = join(dir, 'code/habit');
+  assert.deepEqual(metroHook(habit), { file: null, name: 'metro.config.js', present: false, line: HOOK_LINE });
+  const created = addMetroHook(habit, { home: dir });
+  assert.equal(created.created, true);
+  const text = readFileSync(join(habit, 'metro.config.js'), 'utf8');
+  assert.match(text, /require\('expo\/metro-config'\)/);
+  assert.ok(text.endsWith(`${HOOK_LINE}\n`));
+  assert.equal(addMetroHook(habit, { home: dir }).changed, false, 'never twice');
+  assert.equal(readFileSync(join(habit, 'metro.config.js'), 'utf8'), text);
+  assert.equal(realpathSync(join(dir, '.node_modules/@fav-devs/macbuild')), realpathSync(ROOT));
+  assert.equal(readiness({ name: 'habit', dir: habit }).hook.present, true);
+  // An existing config gets the line appended and keeps everything else.
+  writeFileSync(join(dir, 'code/go/metro.config.js'), "const { getDefaultConfig } = require('expo/metro-config');\nmodule.exports = getDefaultConfig(__dirname);");
+  addMetroHook(join(dir, 'code/go'), { home: dir });
+  assert.match(readFileSync(join(dir, 'code/go/metro.config.js'), 'utf8'), /^const \{ getDefaultConfig \}[\s\S]*module\.exports = getDefaultConfig\(__dirname\);\n\n\/\/ macbuild: [\s\S]*\ntry \{ require\('@fav-devs\/macbuild\/metro'\)\.attach\(\); \} catch \{\}\n$/);
+  writeFileSync(join(dir, 'code/plain/metro.config.ts'), 'export default {};\n');
+  assert.throws(() => addMetroHook(join(dir, 'code/plain'), { home: dir }), /doesn't edit metro\.config\.ts/);
+  // Never replaces a real folder someone put there.
+  const other = realpathSync(mkdtempSync(join(tmpdir(), 'macbuild-link-')));
+  mkdirSync(join(other, '.node_modules/@fav-devs/macbuild'), { recursive: true });
+  assert.equal(linkForNode({ home: other }).ok, false);
+});
+
+test('with the line in metro.config.js, npx expo start in a terminal shows on the dashboard in full and takes its keys', { timeout: 90000 }, async () => {
+  const { dir, env, projects } = home();
+  const socket = join(dir, 'h.sock');
+  const port = 8300 + Math.floor(Math.random() * 400);
+  const habit = join(dir, 'code/habit');
+  addMetroHook(habit, { home: dir });
+  const hookEnv = { ...env, MACBUILD_DEV_SOCKET: socket };
+  delete hookEnv.CI; // the hook stays out of CI; this test plays a person at a terminal
+  const make = () => new DevServers({ dir: join(dir, 'dev'), projects, builds: () => [], tailnetHost: () => '', env: hookEnv });
+  let dev = make();
+  dev.listenHooks(socket);
+  await until(() => existsSync(socket));
+  let screen = '';
+  let terminal = spawn(process.execPath, [join(ROOT, 'ui/demo/fake-expo.mjs'), 'expo', 'start', '--port', String(port)], { cwd: habit, env: hookEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+  terminal.stdout.on('data', (chunk) => { screen += chunk; });
+  try {
+    const session = await until(() => { const live = dev.view('habit').session; return live?.hooked && live.status === 'running' && live; });
+    assert.equal(session.terminal, true);
+    assert.equal(session.pid, terminal.pid);
+    assert.equal(session.port, port);
+    assert.equal(session.urls.app, `exp+habit://expo-development-client/?url=${encodeURIComponent(`http://192.168.1.42:${port}`)}`, 'the links are the ones Expo printed');
+    assert.match(screen, /Metro waiting on/, 'the terminal itself is unchanged');
+    assert.ok((await dev.log('habit', { tail: 100 })).lines.some((line) => /Metro waiting on/.test(line.text)), 'and the dashboard has what it shows');
+    assert.equal(dev.list().find((item) => item.project === 'habit').terminal, true);
+
+    // Keys typed on the dashboard reach Expo: a reload, then a list Expo shows, answered from here.
+    let mark = (await dev.log('habit', { tail: 1 })).next;
+    dev.input('habit', { key: 'reload' });
+    await until(async () => (await dev.log('habit', { since: mark })).lines.some((line) => line.text === '› Reloading apps'));
+    dev.input('habit', { key: 'M' });
+    const prompt = await until(() => dev.view('habit').session.prompt);
+    assert.equal(prompt.kind, 'select');
+    mark = (await dev.log('habit', { tail: 1 })).next;
+    dev.choose('habit', 2);
+    await until(async () => (await dev.log('habit', { since: mark })).lines.some((line) => line.text === '› Opening TanStack Query devtools'));
+    assert.match(screen, /Opening TanStack Query devtools/, 'answered in the terminal too');
+
+    await dev.scan();
+    assert.equal(dev.external.size, 0, 'the scan doesn’t follow it a second time');
+    assert.equal(dev.running().length, 1);
+    await assert.rejects(dev.start('habit'), /shows here in full/);
+    await assert.rejects(dev.takeOver('habit'), /already shows here in full/);
+    assert.equal(dev.resize('habit', 80, 24), false, 'its terminal isn’t ours to resize');
+
+    // The dashboard restarts: the hook finds the new one and replays the screen.
+    dev.stopAll();
+    dev = make();
+    dev.listenHooks(socket);
+    const again = await until(() => { const live = dev.view('habit').session; return live?.hooked && live.status === 'running' && live; }, 15000);
+    assert.equal(again.pid, terminal.pid);
+    assert.ok((await dev.log('habit', { tail: 200 })).lines.some((line) => /Metro waiting on/.test(line.text)));
+
+    // Stop: as Ctrl-C in its terminal would.
+    dev.stop('habit');
+    await until(() => terminal.exitCode !== null && dev.view('habit').session.status === 'stopped');
+    assert.equal(dev.view('habit').session.reason, '');
+
+    // macbuild's own dev server for the same app doesn't hook itself.
+    await dev.start('habit', { connection: 'lan', port });
+    await until(() => dev.view('habit').session.status === 'running');
+    await sleep(800);
+    assert.equal(dev.hooked.size, 0);
+    assert.equal(dev.view('habit').session.hooked, undefined);
+  } finally { dev.stopAll(); terminal.kill(); }
 });
