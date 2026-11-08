@@ -1,0 +1,26 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@latest
+      - run: npm ci --prefix ui --no-audit --no-fund
+      - run: npm test
+      - run: npm pack --dry-run
+      # Configure fav-devs/macbuild and publish.yml as a trusted publisher on npm first.
+      - run: npm publish --access public
