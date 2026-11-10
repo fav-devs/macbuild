@@ -2,6 +2,14 @@ name: Publish to npm
 
 on:
   workflow_dispatch:
+    inputs:
+      action:
+        description: Stage for approval or publish directly
+        type: choice
+        default: stage
+        options:
+          - stage
+          - publish
 
 permissions:
   contents: read
@@ -23,4 +31,14 @@ jobs:
       - run: npm test
       - run: npm pack --dry-run
       # Configure fav-devs/macbuild and publish.yml as a trusted publisher on npm first.
-      - run: npm publish --access public
+      # Alternatively, save a granular npm token as the repository secret NPM_TOKEN.
+      - name: Stage package for npm approval
+        if: inputs.action == 'stage'
+        run: npm stage publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish package directly
+        if: inputs.action == 'publish'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
