@@ -166,7 +166,8 @@ describe('wait', { concurrency: 1 }, () => {
   });
 
   test('macbuild mcp answers tools/list over stdio', async () => {
-    const child = spawn(MACBUILD, ['mcp'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // This tests the local MCP protocol even when the developer has a saved Mac connection.
+    const child = spawn(MACBUILD, ['mcp'], { env: { ...process.env, MACBUILD_LOCAL: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
     const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
     const stdout = await new Promise((resolve, reject) => {
