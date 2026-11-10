@@ -12,7 +12,33 @@ npm install -g @fav-devs/macbuild
 
 It runs no install scripts. On the Mac itself, keep using `install.sh`.
 
-## Connect a client
+## Connect once and link folders
+
+For a trusted personal laptop or server, pair the device once. On the Mac:
+
+```sh
+macbuild server device create --name my-laptop
+```
+
+This credential stays valid until revoked. It grants development builds of all projects registered on this Mac, including projects registered later; it does not grant OTA or store releases. Use `--projects parley,less` to restrict a device, or `--expires-days 30` for an expiry. Existing scoped CI tokens retain their original expiry and permissions. List trusted devices with `macbuild server device list` and revoke one with `macbuild server device revoke ID`.
+
+Transfer the credential privately, then connect on the client using stdin (never a token argument):
+
+```sh
+macbuild connect home-mac https://your-mac.ts.net:8443 --token-stdin < private-token-file
+macbuild list
+cd /path/to/local/parley
+macbuild link parley
+macbuild
+```
+
+Delete the temporary credential file after connecting. For another app, enter its local folder and run `macbuild link APP_NAME`; no credential replacement is needed. `macbuild link PROJECT /path/to/folder --remote MAC_NAME` also works. The Mac must run a version supporting folder links. The local and Mac project Git origins must match.
+
+Connections and folder links are saved privately on the client, outside your repositories. Links apply inside their folder and subfolders; the closest link wins. They select both the Mac and its registered project. `macbuild` or `macbuild build` then builds the linked project; `macbuild dev` opens that project's Mac dev server when the device has the `dev` scope. Use `macbuild links` to inspect links, `macbuild unlink` in the linked root to remove one, and `macbuild remote remove NAME` to remove a connection and its links. An explicit `--remote` overrides the linked Mac; supply a project name when choosing a different Mac.
+
+Folder linking selects a project; builds still use matching, pushed Git commits, and dev servers still serve the Mac's working copy. It does not synchronize uncommitted files. Native compilation runs on the Mac.
+
+## Connect a scoped CI client
 
 1. On the Mac, complete the normal `macbuild setup --ui`, Expo login, signing setup, and project registration. Verify a local build works first. The dashboard must be reachable from the client over HTTPS, normally through Tailscale.
 2. On the Mac, create a separately revocable token for each client. Start with development builds only:
@@ -54,7 +80,7 @@ macbuild parley --profile development --wait --json
 - **No automatic staging, committing, or pushing.** `push --confirm-push` pushes the clean current branch without force; rejected or divergent pushes remain rejected. Use Git for commit selection and history review.
 - By default, dirty files, unpushed HEAD commits, and a local HEAD that differs from origin block a job. `--ref main --allow-dirty` intentionally builds only that pushed source, excluding local changes. Detached HEAD needs an explicit `--ref`.
 - Client and server origins must identify the same HTTPS/SSH repository. The server fetches origin, verifies the exact commit is reachable from an origin branch, and rejects a moved branch. It always queues the pinned SHA, never the Mac's dirty working copy. No source ZIPs, arbitrary shell commands, or remote project-path registration are accepted.
-- Tokens have explicit project, profile, and action allowlists. Scopes are `read`, `build`, `update`, `submit`, `cancel`, and `dev` (start, stop and press keys in the Mac's dev servers). Use `read` alongside mutation scopes for monitoring. No wildcard project/profile permissions.
+- Tokens have explicit project, profile, and action allowlists. Scopes are `read`, `build`, `update`, `submit`, `cancel`, and `dev` (start, stop and press keys in the Mac's dev servers). Use `read` alongside mutation scopes for monitoring. Trusted devices can allow all registered projects; scoped CI tokens require explicit project allowlists. Profile permissions remain explicit.
 - To require GitHub CI, add `--required-checks "tests,typecheck"` when issuing a token. The Mac's authenticated `gh` must be able to read check runs/statuses. Each named check must succeed for the exact SHA. Missing, pending, failed, or unreadable checks block queueing. This checks reported results, not branch-protection or workflow-author trust; configure those in GitHub as well.
 - OTA/store releases additionally require `--confirm-release` and the relevant token scope. For example, issue a separate release token with `--profiles production --scopes read,build,update,submit`. macbuild never requests an Apple password from the remote client; first-time credentials and unexpected signing prompts must be resolved on the Mac.
 

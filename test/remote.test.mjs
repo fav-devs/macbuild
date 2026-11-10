@@ -95,7 +95,7 @@ test('npm bin entry runs through a Unix symlink', { skip: process.platform === '
   const link = join(folder, 'macbuild');
   symlinkSync(join(ROOT, 'bin/macbuild.mjs'), link);
   const output = execFileSync(process.execPath, [link, '--help'], { encoding: 'utf8' });
-  assert.match(output, /Connect: macbuild remote add/);
+  assert.match(output, /Connect: macbuild connect/);
 });
 
 test('remote MCP validates arguments and requires explicit release confirmation', async () => {
@@ -158,4 +158,101 @@ test('remote MCP uses newline-delimited JSON and a wait does not block other too
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(text.trim().split('\n').map(JSON.parse).some((reply) => reply.id === 2));
   input.end();
+});
+
+test('trusted devices persist until revoked and can access newly registered projects', async () => {
+  const { permitsProject } = await import('../lib/remote-access.mjs');
+  const issued = issueToken({ name: 'laptop', device: true, allProjects: true, expiresDays: 0 }, file);
+  let token = authenticate(`Bearer ${issued.token}`, file);
+  assert.equal(token.expiresAt, null);
+  assert.equal(permitsProject(token, 'new-project'), true);
+  assert.equal(token.scopes.includes('submit'), false);
+  assert.deepEqual(token.profiles, ['development']);
+  assert.equal(readFileSync(file, 'utf8').includes(issued.token), false);
+  revokeToken(issued.id, file);
+  assert.equal(authenticate(`Bearer ${issued.token}`, file), null);
+  const scoped = issueToken({ name: 'limited', device: true, projects: ['parley'], expiresDays: 0 }, file);
+  token = authenticate(`Bearer ${scoped.token}`, file);
+  assert.equal(permitsProject(token, 'parley'), true);
+  assert.equal(permitsProject(token, 'new-project'), false);
+  assert.throws(() => issueToken({ name: 'ci', allProjects: true, projects: ['parley'] }, file));
+  assert.throws(() => issueToken({ name: 'ci', projects: ['parley'], expiresDays: 0 }, file));
+});
+
+test('folder links validate origins and route the installed CLI without changing the repo', async () => {
+  const { createServer } = await import('node:http');
+  const { promisify } = await import('node:util');
+  const exec = promisify((await import('node:child_process')).execFile);
+  const { folderLink, linkFolder, unlinkFolder } = await import('../lib/remote-client.mjs');
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/api/remote/v1/projects') return res.end(JSON.stringify([{ name: 'app', repository: 'github.com/acme/linked' }, { name: 'wrong', repository: 'github.com/acme/other' }]));
+    if (req.url === '/api/remote/v1/info') return res.end('{}');
+    if (req.method === 'POST' && req.url === '/api/remote/v1/jobs') {
+      let body = ''; for await (const chunk of req) body += chunk;
+      requests.push(JSON.parse(body));
+      return res.end(JSON.stringify({ id: 'fake-build' }));
+    }
+    res.statusCode = 404; res.end(JSON.stringify({ error: 'unexpected request' }));
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const configFile = join(folder, 'folder-links.json');
+  const previous = process.env.MACBUILD_REMOTES;
+  process.env.MACBUILD_REMOTES = configFile;
+  try {
+    const repo = join(folder, 'linked-app'); const origin = join(folder, 'linked-origin.git');
+    mkdirSync(repo); mkdirSync(join(repo, 'src'));
+    git(folder, 'init', '-q', '--bare', origin); git(repo, 'init', '-q', '-b', 'main');
+    writeFileSync(join(repo, 'app.js'), 'app'); git(repo, 'add', 'app.js'); git(repo, 'commit', '-qm', 'initial');
+    git(repo, 'remote', 'add', 'origin', 'https://github.com/acme/linked.git');
+    git(repo, 'config', `url.${origin}.insteadOf`, 'https://github.com/acme/linked.git'); git(repo, 'push', '-q', 'origin', 'main');
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const token = issueToken({ name: 'folder', projects: ['app'] }, file).token;
+    saveRemote('first', url, token); saveRemote('second', url, token);
+    await assert.rejects(linkFolder('wrong', 'second', repo), /origins do not match/);
+    await assert.rejects(linkFolder('absent', 'second', repo), /does not allow/);
+    await linkFolder('app', 'second', repo);
+    assert.equal(folderLink(join(repo, 'src')).remote, 'second');
+    assert.equal(git(repo, 'status', '--porcelain'), '');
+    const cli = (...args) => exec(process.execPath, [join(ROOT, 'bin/macbuild.mjs'), ...args], { cwd: join(repo, 'src'), env: process.env });
+    assert.match((await cli()).stdout, /fake-build/);
+    assert.equal(requests[0].project, 'app');
+    assert.equal(requests[0].repository, 'github.com/acme/linked');
+    assert.equal(requests[0].commit, git(repo, 'rev-parse', 'HEAD'));
+    await assert.rejects(cli('build', '--remote', 'first'), /project name is required/);
+    await assert.rejects(exec(process.execPath, [join(ROOT, 'bin/macbuild.mjs'), 'build'], { cwd: repo, env: { ...process.env, MACBUILD_SERVER_URL: url, MACBUILD_TOKEN: token } }), /project name is required/);
+    assert.equal(requests.length, 1, 'an override cannot accidentally reuse another Mac’s link');
+    await cli('remote', 'remove', 'second');
+    assert.equal(folderLink(repo), null, 'removing a Mac removes its folder links');
+    await linkFolder('app', 'first', repo);
+    unlinkFolder(repo); assert.equal(folderLink(repo), null);
+  } finally {
+    process.env.MACBUILD_REMOTES = previous;
+    await new Promise((done) => server.close(done));
+  }
+});
+
+test('device API discovers new projects, enforces profiles, and rejects revoked credentials', async () => {
+  const issued = issueToken({ name: 'device-api', device: true, allProjects: true, expiresDays: 0 }, file);
+  const registered = [{ name: 'first', dir: '/first' }];
+  const handler = remoteApi({
+    projects: () => registered, profiles: () => [{ name: 'development' }, { name: 'production' }],
+    git: async () => 'https://github.com/acme/app.git',
+    json: (res, code, body) => { res.statusCode = code; res.body = body; },
+  });
+  const request = async (route, body) => {
+    const req = new PassThrough(); req.method = body ? 'POST' : 'GET';
+    req.headers = { authorization: `Bearer ${issued.token}` }; req.end(body ? JSON.stringify(body) : '');
+    const res = {}; await handler(req, res, new URL(`http://local/api/remote/v1/${route}`)); return res;
+  };
+  assert.equal((await request('projects')).body.length, 1);
+  registered.push({ name: 'second', dir: '/second' });
+  const projects = (await request('projects')).body;
+  assert.deepEqual(projects.map((p) => p.name), ['first', 'second']);
+  assert.equal(projects[1].repository, 'github.com/acme/app');
+  assert.deepEqual(projects[1].profiles.map((p) => p.name), ['development']);
+  assert.equal((await request('preflight', { project: 'second', profile: 'production' })).statusCode, 403);
+  revokeToken(issued.id, file);
+  assert.equal((await request('projects')).statusCode, 401);
 });

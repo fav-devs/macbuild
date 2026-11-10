@@ -22,7 +22,7 @@ START=$SECONDS
 HERE=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd); [ -d "$HERE/../lib" ] || HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 if [ "${MACBUILD_LOCAL:-}" != 1 ]; then
-  case "${1:-}" in remote|server|source|push) exec node "$ROOT/bin/macbuild.mjs" "$@";; esac
+  case "${1:-}" in connect|link|unlink|links|remote|server|source|push) exec node "$ROOT/bin/macbuild.mjs" "$@";; esac
   for arg in "$@"; do
     case "$arg" in --remote|--local) exec node "$ROOT/bin/macbuild.mjs" "$@";; esac
   done
