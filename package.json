@@ -1,14 +1,43 @@
 {
   "name": "@fav-devs/macbuild",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Build Expo apps on your Mac from Windows, Linux, macOS, or an agent.",
   "type": "module",
-  "bin": { "macbuild": "bin/macbuild.mjs" },
-  "exports": { "./metro": "./lib/metro.cjs", "./package.json": "./package.json" },
-  "engines": { "node": ">=22" },
+  "bin": {
+    "macbuild": "bin/macbuild.mjs"
+  },
+  "exports": {
+    "./metro": "./lib/metro.cjs",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/fav-devs/macbuild.git" },
-  "files": ["bin/", "lib/", "skills/", "ui/server.mjs", "ui/public/", "ui/package.json", "ui/package-lock.json", "macos/", "install.sh", "install-ui.sh", "env.example", "AGENTS.md"],
-  "scripts": { "test": "node --test test/*.test.mjs" },
-  "dependencies": { "qrcode": "^1.5.4", "web-push": "^3.6.7" }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fav-devs/macbuild.git"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "skills/",
+    "ui/server.mjs",
+    "ui/public/",
+    "ui/package.json",
+    "ui/package-lock.json",
+    "macos/",
+    "install.sh",
+    "install-ui.sh",
+    "env.example",
+    "AGENTS.md",
+    "docs/*.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "web-push": "^3.6.7"
+  }
 }
