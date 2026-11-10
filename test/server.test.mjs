@@ -891,3 +891,35 @@ exit 0
     child.kill();
   }
 });
+
+test('Settings lists device access without secrets and revokes it with dashboard protection', async () => {
+  const file = join(home, '.config/macbuild/remote-server.json');
+  const issued = issueToken({ name: 'Linux laptop <test>', device: true, allProjects: true, scopes: ['read', 'build', 'cancel'], expiresDays: 0 }, file);
+  const headers = { authorization: `Bearer ${issued.token}` };
+  const endpoint = '/api/settings/devices';
+  let response = await request(endpoint);
+  assert.equal(response.status, 200);
+  let device = response.json.devices.find((item) => item.id === issued.id);
+  assert.equal(device.status, 'authorized');
+  assert.equal(device.allProjects, true);
+  assert.equal(device.lastSeenAt, null);
+  assert.equal(device.expiresAt, null);
+  const privateRecord = JSON.parse(readFileSync(file)).tokens.find((item) => item.id === issued.id);
+  assert.equal(JSON.stringify(response.json).includes(privateRecord.hash), false);
+  assert.equal(JSON.stringify(response.json).includes(issued.token), false);
+  assert.equal('hash' in device, false);
+  assert.equal((await request('/api/remote/v1/info', { headers })).status, 200);
+  response = await request(endpoint);
+  device = response.json.devices.find((item) => item.id === issued.id);
+  assert.ok(device.lastSeenAt >= issued.createdAt);
+  assert.equal((await request(endpoint, { headers })).status, 403, 'remote credentials cannot administer devices');
+  const revoke = `${endpoint}/${issued.id}/revoke`;
+  assert.equal((await request(revoke, { method: 'POST', csrf: false })).status, 403);
+  assert.equal((await request(revoke, { method: 'POST', headers })).status, 403);
+  assert.equal((await request(`${endpoint}/invalid/revoke`, { method: 'POST' })).status, 400);
+  assert.equal((await request(`${endpoint}/${'f'.repeat(20)}/revoke`, { method: 'POST' })).status, 404);
+  const revoked = await request(revoke, { method: 'POST' });
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.json.devices.find((item) => item.id === issued.id).status, 'revoked');
+  assert.equal((await request('/api/remote/v1/info', { headers })).status, 401);
+});

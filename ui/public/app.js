@@ -1871,6 +1871,7 @@ async function settingsPage() {
         </select>
         <p class="hint" id="ask-note"></p></div>`)}
     </div><div class="stack">
+      ${card('Connected devices', 'mac', `<div id="connected-devices" aria-live="polite">${skeleton(2)}</div><p class="hint" id="device-note" role="status"></p>`, '<button class="btn sm ghost" id="devices-refresh">Refresh</button>')}
       ${card('Integrations', 'link', `<div class="rows">
         <label class="toggle"><span><b>GitHub checks</b><small>${tools.gh ? '' : 'Run gh auth login'}</small></span><input class="switch" type="checkbox" id="gh-status" ${settings.githubStatus ? 'checked' : ''} ${tools.gh || settings.githubStatus ? '' : 'disabled'}></label>
         <form class="setting" id="hook-form"><div><b>Slack or Discord</b></div>
@@ -1886,6 +1887,38 @@ async function settingsPage() {
       ${card('Tools', 'gear', setup.doctor?.items?.length ? doctorRows(setup.doctor.items) : kv([['Xcode', esc(tools.xcode || '—')], ['EAS CLI', esc(tools.eas || '—')], ['Node.js', esc(tools.node)], ['GitHub CLI', tools.gh ? 'Signed in' : '<span class="faint">Not signed in</span>'], ['Android SDK', tools.android ? 'Found' : '<span class="faint">Not installed</span>']], 'list-kv'))}
       ${card('About', 'cube', `<div class="card-body muted"><a class="link" href="https://github.com/fav-devs/macbuild">github.com/fav-devs/macbuild</a></div>`)}
     </div></div>`;
+  const devicesPage = routing.token;
+  const drawDevices = ({ devices }) => {
+    if (routing.token !== devicesPage) return;
+    $('#connected-devices').innerHTML = devices.length ? `<div class="rows">${devices.map((device) => {
+      const status = { authorized: 'Authorized', expired: 'Expired', revoked: 'Revoked' }[device.status] || 'Unknown';
+      const access = device.allProjects ? 'All Mac projects' : device.projects.join(', ');
+      const seen = device.lastSeenAt ? `Last activity ${ago(device.lastSeenAt)}` : 'Not used yet';
+      const expiry = device.expiresAt ? `Expires ${day(device.expiresAt)}` : 'Until revoked';
+      return `<div class="row"><span class="main"><span class="title">${esc(device.name)} <span class="tag">${status}</span></span>
+        <span class="meta">${device.device ? 'Trusted device' : 'Scoped connection'} · ${esc(seen)}</span>
+        <span class="meta">${esc(access)} · ${esc(device.profiles.join(', '))}</span>
+        <span class="meta">${esc(device.scopes.join(', '))} · ${esc(expiry)}</span></span>
+        ${device.status === 'authorized' ? `<button class="btn sm" data-revoke-device="${esc(device.id)}" data-device-name="${esc(device.name)}" aria-label="Revoke access for ${esc(device.name)}">Revoke</button>` : ''}</div>`;
+    }).join('')}</div>` : empty('mac', 'No connected devices', 'Connect a laptop or server once, then link its local folders to projects on this Mac.');
+  };
+  const loadDevices = async () => {
+    const button = $('#devices-refresh');
+    button.disabled = true;
+    try {
+      const result = await get('/api/settings/devices');
+      if (routing.token !== devicesPage) return;
+      drawDevices(result);
+      $('#device-note').className = 'hint';
+      $('#device-note').textContent = 'Last activity updates about once a minute. Revoking access does not stop builds already queued or running.';
+    } catch {
+      if (routing.token !== devicesPage) return;
+      $('#device-note').className = 'hint bad';
+      $('#device-note').textContent = 'Couldn’t load connected devices. Try Refresh.';
+      if (!$('#connected-devices').querySelector('.rows')) $('#connected-devices').innerHTML = '';
+    } finally { button.disabled = false; }
+  };
+  loadDevices();
   const drawDisk = (disk) => {
     const clearable = disk.items.filter((item) => item.cleanable && item.bytes).reduce((sum, item) => sum + item.bytes, 0);
     $('#disk').innerHTML = `<div class="rows">${disk.items.map((item) => `<div class="row"><span class="main"><span class="title">${esc(item.label)}</span></span>
@@ -1934,6 +1967,25 @@ async function settingsPage() {
     if (await saveSetting({ appleTeam: $('#team').value.trim().toUpperCase() }, $('#team-note'))) { expoCache.clear(); $('#team-note').className = 'hint ok'; $('#team-note').textContent = 'Saved.'; }
   };
   app.onclick = async (event) => {
+    if (event.target.closest('#devices-refresh')) { await loadDevices(); return; }
+    const revoke = event.target.closest('[data-revoke-device]');
+    if (revoke) {
+      if (!confirm(`Revoke ${revoke.dataset.deviceName}’s access to this Mac? Builds already queued or running will continue.`)) return;
+      revoke.disabled = true; revoke.textContent = 'Revoking…';
+      try {
+        const result = await post(`/api/settings/devices/${encodeURIComponent(revoke.dataset.revokeDevice)}/revoke`, {});
+        if (routing.token !== devicesPage) return;
+        if (result.error) throw new Error(result.error);
+        drawDevices(result);
+        $('#device-note').className = 'hint ok';
+        $('#device-note').textContent = 'Access revoked. This device can no longer use the Mac.';
+      } catch (error) {
+        if (routing.token !== devicesPage) return;
+        $('#device-note').className = 'hint bad'; $('#device-note').textContent = error.message || 'Couldn’t revoke access.';
+        revoke.disabled = false; revoke.textContent = 'Revoke';
+      }
+      return;
+    }
     const test = event.target.closest('#push-test');
     if (test) { test.textContent = 'Sent'; await post('/api/push', { test: true }); }
     if (event.target.closest('#hook-test')) {

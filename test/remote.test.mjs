@@ -256,3 +256,21 @@ test('device API discovers new projects, enforces profiles, and rejects revoked 
   revokeToken(issued.id, file);
   assert.equal((await request('projects')).statusCode, 401);
 });
+
+test('last activity persists with bounded writes and expired connections remain visible', async () => {
+  const { connectedDevices, recordTokenUse } = await import('../lib/remote-access.mjs');
+  const issued = issueToken({ name: 'activity', projects: ['app'] }, file);
+  recordTokenUse(issued.id, file);
+  const first = connectedDevices(file).find((device) => device.id === issued.id);
+  assert.ok(first.lastSeenAt >= issued.createdAt);
+  const snapshot = readFileSync(file, 'utf8');
+  recordTokenUse(issued.id, file);
+  assert.equal(readFileSync(file, 'utf8'), snapshot);
+  const access = loadAccess(file);
+  access.tokens.find((token) => token.id === issued.id).expiresAt = 1;
+  writeFileSync(file, JSON.stringify(access));
+  assert.equal(connectedDevices(file).find((device) => device.id === issued.id).status, 'expired');
+  revokeToken(issued.id, file);
+  const revoked = readFileSync(file, 'utf8'); recordTokenUse(issued.id, file);
+  assert.equal(readFileSync(file, 'utf8'), revoked);
+});

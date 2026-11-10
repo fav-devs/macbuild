@@ -20,7 +20,7 @@ For a trusted personal laptop or server, pair the device once. On the Mac:
 macbuild server device create --name my-laptop
 ```
 
-This credential stays valid until revoked. It grants development builds of all projects registered on this Mac, including projects registered later; it does not grant OTA or store releases. Use `--projects parley,less` to restrict a device, or `--expires-days 30` for an expiry. Existing scoped CI tokens retain their original expiry and permissions. List trusted devices with `macbuild server device list` and revoke one with `macbuild server device revoke ID`.
+This credential stays valid until revoked. It grants development builds of all projects registered on this Mac, including projects registered later; it does not grant OTA or store releases. Use `--projects parley,less` to restrict a device, or `--expires-days 30` for an expiry. Existing scoped CI tokens retain their original expiry and permissions. View connections in **Settings → Connected devices**, including access, last activity, expiry, and revocation. Last activity does not indicate that a device is online. You can also list trusted devices with `macbuild server device list` and revoke one with `macbuild server device revoke ID`.
 
 Transfer the credential privately, then connect on the client using stdin (never a token argument):
 

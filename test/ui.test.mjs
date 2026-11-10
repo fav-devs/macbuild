@@ -74,3 +74,33 @@ test('live dashboard shows both a build and its independent upload lane', () => 
   assert.match(html, /data-live-job="upload"/);
   assert.match(html, /Upload · production/);
 });
+
+test('Settings device rows escape names and only offer revocation for authorized connections', () => {
+  const renderSource = source.slice(source.indexOf('  const devicesPage = routing.token;'), source.indexOf('  const loadDevices = async () =>'));
+  const escapeSource = source.match(/^const esc = .*;$/m)[0];
+  const element = { innerHTML: '' };
+  const render = (devices) => {
+    runInNewContext(`${escapeSource}\n${renderSource}\ndrawDevices({ devices });`, {
+      devices, routing: { token: 1 }, $: () => element,
+      ago: () => 'a minute ago', day: () => 'Dec 10', empty: () => 'No connected devices',
+    });
+    return element.innerHTML;
+  };
+  const base = { id: 'abc', name: '<img src=x onerror=alert(1)>', device: true, allProjects: true, projects: [], profiles: ['development'], scopes: ['read', 'build'], expiresAt: null, lastSeenAt: 100 };
+  const html = render([{ ...base, status: 'authorized' }]);
+  assert.doesNotMatch(html, /<img|\bOnline\b/);
+  assert.match(html, /&#60;img/);
+  assert.match(html, /All Mac projects/);
+  assert.match(html, /Until revoked/);
+  assert.match(html, /Last activity a minute ago/);
+  assert.match(html, /data-revoke-device="abc"/);
+  for (const status of ['revoked', 'expired']) {
+    assert.doesNotMatch(render([{ ...base, status }]), /data-revoke-device/);
+  }
+  const scoped = render([{ ...base, device: false, allProjects: false, projects: ['parley'], status: 'authorized', lastSeenAt: null, expiresAt: 100 }]);
+  assert.match(scoped, /Scoped connection/);
+  assert.match(scoped, /parley/);
+  assert.match(scoped, /Not used yet/);
+  assert.match(scoped, /Expires Dec 10/);
+  assert.equal(render([]), 'No connected devices');
+});

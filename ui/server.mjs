@@ -15,6 +15,7 @@ import { failureLine, jobSucceeded, recoverArtifact } from '../lib/build-result.
 import { listDevices, pickDevice, preferredDeviceId, tryInstall } from '../lib/device.mjs';
 import { readProfiles } from '../lib/profile.mjs';
 import { updateOptions } from '../lib/update.mjs';
+import { connectedDevices, revokeToken } from '../lib/remote-access.mjs';
 import { remoteApi } from '../lib/remote-api.mjs';
 import { currentCommit, inspectRepo, startCommit, t3Bin } from '../lib/commit.mjs';
 import { listAskChoices, parseAskChoice, startAsk } from '../lib/ask.mjs';
@@ -1296,6 +1297,14 @@ async function api(req, res, url) {
   if (url.pathname === '/api/disk/clean' && req.method === 'POST') {
     const { status, error } = await cleanDisk((await body(req)).key);
     return json(res, status, error ? { error } : await disk(true));
+  }
+  if (url.pathname === '/api/settings/devices' && req.method === 'GET') return json(res, 200, { devices: connectedDevices() });
+  if (parts[1] === 'settings' && parts[2] === 'devices' && parts[4] === 'revoke' && parts.length === 5 && req.method === 'POST') {
+    const id = parts[3];
+    if (!/^[a-f0-9]{20}$/.test(id)) return json(res, 400, { error: 'Invalid device id.' });
+    try { revokeToken(id); }
+    catch (error) { if (error.message === 'Unknown token id.') return json(res, 404, { error: 'Device not found.' }); throw error; }
+    return json(res, 200, { devices: connectedDevices() });
   }
   if (url.pathname === '/api/settings' && req.method === 'POST') return settings(req, res);
   if (url.pathname === '/api/settings/webhook-test' && req.method === 'POST') {
